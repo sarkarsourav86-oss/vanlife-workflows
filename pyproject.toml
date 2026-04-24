@@ -1,0 +1,22 @@
+[project]
+name = "vanlife-workflows"
+version = "0.1.0"
+description = "AI-powered vanlife automation on top of the Campflare API"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "anthropic>=0.40",
+    "langchain>=0.3",
+    "langchain-anthropic>=0.3",
+    "python-dotenv>=1.0",
+    "modal>=0.67",
+    "fastapi>=0.115",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
