@@ -45,12 +45,12 @@ class BoundingBox(BaseModel):
 
 class DateRange(BaseModel):
     starting_date: date
-    ending_date: date
+    ending_date: date | None = None
     nights: int = 1
 
 
 class AvailabilityFilter(BaseModel):
-    """Nested filter passed to /campgrounds/search and /alerts.
+    """Nested filter passed to /campgrounds/search and /alert/create.
 
     Note: Campflare uses `date_ranges` with `starting_date`/`ending_date`/`nights`
     per range — NOT a flat start_date/end_date/nights at this level.
@@ -58,7 +58,8 @@ class AvailabilityFilter(BaseModel):
     date_ranges: list[DateRange]
     status: list[AvailabilityStatus] = Field(default_factory=lambda: ["available"])
     campsite_kinds: list[CampsiteKind] | None = None
-    minimum_rv_length: float | None = None
+    min_rv_length: float | None = None
+    min_trailer_length: float | None = None
 
 
 class CampgroundSearchRequest(BaseModel):
@@ -154,18 +155,20 @@ class CampflareClient:
         )
 
     def create_alert(self, req: CreateAlertRequest) -> dict:
-        """POST /alerts — returns alert metadata including id."""
-        return self._post("/alerts", req.model_dump(exclude_none=True, mode="json"))
+        """POST /alert/create — returns alert metadata including id."""
+        return self._post("/alert/create", req.model_dump(exclude_none=True, mode="json"))
 
     def get_alert(self, alert_id: str) -> dict:
-        return self._get(f"/alerts/{alert_id}")
+        """GET /alert/{id} — note the action-suffix scheme does NOT apply here."""
+        return self._get(f"/alert/{alert_id}")
 
     def cancel_alert(self, alert_id: str) -> dict:
-        return self._delete(f"/alerts/{alert_id}")
+        """POST /alert/{id}/cancel — returns the alert with canceled_at set."""
+        return self._post(f"/alert/{alert_id}/cancel", {})
 
     def test_alert(self, alert_id: str) -> dict:
-        """POST /alerts/{id}/test — sends a simulated webhook."""
-        return self._post(f"/alerts/{alert_id}/test", {})
+        """POST /alert/{id}/test — sends a simulated webhook."""
+        return self._post(f"/alert/{alert_id}/test", {})
 
     def search_notices(
         self,
