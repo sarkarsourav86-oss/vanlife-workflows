@@ -43,11 +43,19 @@ class BoundingBox(BaseModel):
     max_longitude: float
 
 
-class AvailabilityFilter(BaseModel):
-    """Nested filter passed to /campgrounds/search and /alerts."""
-    start_date: date
-    end_date: date
+class DateRange(BaseModel):
+    starting_date: date
+    ending_date: date
     nights: int = 1
+
+
+class AvailabilityFilter(BaseModel):
+    """Nested filter passed to /campgrounds/search and /alerts.
+
+    Note: Campflare uses `date_ranges` with `starting_date`/`ending_date`/`nights`
+    per range — NOT a flat start_date/end_date/nights at this level.
+    """
+    date_ranges: list[DateRange]
     status: list[AvailabilityStatus] = Field(default_factory=lambda: ["available"])
     campsite_kinds: list[CampsiteKind] | None = None
     minimum_rv_length: float | None = None

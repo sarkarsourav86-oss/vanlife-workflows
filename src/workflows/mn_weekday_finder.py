@@ -25,6 +25,7 @@ from ..campflare import (
     CampflareClient,
     CampgroundSearchRequest,
     CreateAlertRequest,
+    DateRange,
 )
 
 # Rough bbox over northern MN: from ~Brainerd up to the Canadian border,
@@ -45,19 +46,21 @@ def summer_window(today: date | None = None) -> tuple[date, date]:
 
 
 def find_candidates(client: CampflareClient, limit: int = 12) -> list:
-    """Search for up to `limit` MN campgrounds that suit weekday getaways."""
+    """Search for up to `limit` MN campgrounds that suit weekday getaways.
+
+    Note: we intentionally don't set `status="open"` + `kind="established"`.
+    That combination returns zero results against Campflare's data — the
+    two flags intersect too narrowly. bbox + amenities + campsite_kinds +
+    availability is plenty of filtering.
+    """
     start, end = summer_window()
     req = CampgroundSearchRequest(
         bbox=NORTHERN_MN_BBOX,
         campsite_kinds=["standard", "rv"],
         amenities=["toilets", "water"],
-        status="open",
-        kind="established",
         limit=limit,
         availability=AvailabilityFilter(
-            start_date=start,
-            end_date=end,
-            nights=2,
+            date_ranges=[DateRange(starting_date=start, ending_date=end, nights=2)],
             status=["available"],
         ),
     )
@@ -78,9 +81,7 @@ def create_weekday_alert(
     start, end = summer_window()
     req = CreateAlertRequest(
         parameters=AvailabilityFilter(
-            start_date=start,
-            end_date=end,
-            nights=1,
+            date_ranges=[DateRange(starting_date=start, ending_date=end, nights=1)],
             status=["available"],
             campsite_kinds=["standard", "rv"],
         ),

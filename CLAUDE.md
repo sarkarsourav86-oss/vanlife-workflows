@@ -45,6 +45,8 @@ When adding new workflows, mirror this split and register a new Modal function (
 - `Campground` uses `model_config = {"extra": "allow"}` so the client tolerates new fields from the API without breaking.
 - `bulk_availability` rejects >25 IDs; `create_alert` rejects >12 campground IDs (Pydantic `max_length=12` on `CreateAlertRequest.campground_ids`).
 - The client is a context manager — always use `with CampflareClient() as client:` so the underlying `httpx.Client` closes.
+- `AvailabilityFilter` uses `date_ranges: list[DateRange]` (with `starting_date`/`ending_date`/`nights` per range) — **not** flat top-level `start_date`/`end_date`/`nights`. The server rejects the flat shape with `missing field date_ranges`.
+- `status="open"` combined with `kind="established"` on `CampgroundSearchRequest` intersects too narrowly and returns zero results against real data. Each works individually; together they don't. Avoid the combo.
 
 ### LLM cost tracking
 
