@@ -1,10 +1,22 @@
 """Handle inbound Availability Alert webhooks from Campflare.
 
-Responsibilities:
-  - Parse the JSON payload (shape is tolerant — Campflare may add fields).
-  - If metadata flags `weekdays_only`, filter openings to Mon–Thu nights.
-  - Ask the LLM formatter for human-readable copy.
-  - Post a rich embed to Discord.
+Real webhook payload shape (one notification = one availability):
+
+    {
+      "alert_id": "...",
+      "notification_id": "...",
+      "sent_at": "2026-04-24T23:30:00Z",
+      "campground_id": "...",
+      "campground_name": "Bear Head Lake State Park",
+      "campsite_id": "...",
+      "campsite_name": "Site 12",
+      "reservation_url": "https://...",
+      "date_range": {"starting_date": "2026-07-08", "nights": 2, ...},
+      "metadata": {"workflow": "mn_weekday_finder", "weekdays_only": true, ...}
+    }
+
+We post-filter for weekday nights (Mon-Thu) when metadata flags it, format
+the payload with Haiku, and post a rich embed to Discord.
 """
 
 from __future__ import annotations
@@ -19,67 +31,54 @@ from ..discord import availability_embed, post_to_discord
 def _parse_date(value: Any) -> date:
     if isinstance(value, date):
         return value
-    return datetime.fromisoformat(str(value)).date()
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
 
 
-def _weekday_nights(start: date, end: date) -> list[date]:
-    """Return nights (Mon 0 .. Sun 6) in [start, end) that are Mon–Thu (0–3)."""
-    nights: list[date] = []
-    d = start
-    while d < end:
-        if d.weekday() <= 3:
-            nights.append(d)
-        d += timedelta(days=1)
-    return nights
-
-
-def _filter_weekday_only(openings: list[dict]) -> list[dict]:
-    kept: list[dict] = []
-    for op in openings:
-        start = _parse_date(op.get("start_date"))
-        end_raw = op.get("end_date")
-        end = _parse_date(end_raw) if end_raw else start + timedelta(days=int(op.get("nights", 1)))
-        if _weekday_nights(start, end):
-            kept.append(op)
-    return kept
+def _has_weekday_night(start: date, nights: int) -> bool:
+    """True if any night in [start, start+nights) falls on Mon-Thu (weekday 0-3)."""
+    for i in range(max(nights, 1)):
+        if (start + timedelta(days=i)).weekday() <= 3:
+            return True
+    return False
 
 
 def handle_alert(payload: dict) -> dict:
     """Entry point for webhook POSTs. Returns a small summary for logging."""
     metadata = payload.get("metadata") or {}
-    openings = payload.get("openings") or payload.get("availability") or []
+    date_range = payload.get("date_range") or {}
+    start_raw = date_range.get("starting_date") or date_range.get("start_date")
+    if not start_raw:
+        return {"status": "skipped", "reason": "no starting_date on date_range"}
 
-    if metadata.get("weekdays_only"):
-        openings = _filter_weekday_only(openings)
-        payload = {**payload, "openings": openings}
+    start = _parse_date(start_raw)
+    nights = int(date_range.get("nights") or 1)
 
-    if not openings:
-        return {"status": "skipped", "reason": "no matching openings after filtering"}
+    if metadata.get("weekdays_only") and not _has_weekday_night(start, nights):
+        return {"status": "skipped", "reason": "no weekday nights in window"}
 
     formatted = format_alert(payload)
 
-    cg = payload.get("campground") or {}
-    cg_name = cg.get("name", "Unknown campground")
-    first = openings[0]
-    dates_str = f"{first.get('start_date')} → {first.get('end_date', '?')}"
-    nights = int(first.get("nights", 1))
+    cg_name = payload.get("campground_name") or "Unknown campground"
+    campsite = payload.get("campsite_name")
+    end = start + timedelta(days=nights)
+    dates_str = f"{start.isoformat()} -> {end.isoformat()}"
 
     embed = availability_embed(
         campground_name=cg_name,
         dates=dates_str,
         nights=nights,
-        booking_url=payload.get("booking_url"),
+        booking_url=payload.get("reservation_url"),
         summary=formatted.summary,
     )
-    embed["fields"].append(
-        {"name": "Urgency", "value": formatted.urgency, "inline": True}
-    )
+    if campsite:
+        embed["fields"].append({"name": "Site", "value": campsite, "inline": True})
+    embed["fields"].append({"name": "Urgency", "value": formatted.urgency, "inline": True})
     if formatted.highlights:
         embed["fields"].append(
             {"name": "Highlights",
-             "value": "\n".join(f"• {h}" for h in formatted.highlights),
+             "value": "\n".join(f"- {h}" for h in formatted.highlights),
              "inline": False}
         )
 
     post_to_discord(embeds=[embed])
-    return {"status": "posted", "campground": cg_name, "openings": len(openings)}
+    return {"status": "posted", "campground": cg_name, "start": start.isoformat(), "nights": nights}

@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "modal>=0.67",
     "fastapi>=0.115",
+    "pyjwt>=2.9",
 ]
 
 [project.optional-dependencies]

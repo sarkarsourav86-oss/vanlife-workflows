@@ -14,6 +14,7 @@ Provides:
 from __future__ import annotations
 
 import modal
+from fastapi import Header, HTTPException
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -25,6 +26,7 @@ image = (
         "langchain-anthropic>=0.3",
         "python-dotenv>=1.0",
         "fastapi>=0.115",
+        "pyjwt>=2.9",
     )
     .add_local_python_source("src")
 )
@@ -48,7 +50,38 @@ def refresh_mn_alert() -> dict:
 
 @app.function(secrets=secrets)
 @modal.fastapi_endpoint(method="POST")
-def campflare_webhook(payload: dict) -> dict:
-    """Public webhook Campflare POSTs to when an availability alert fires."""
+def campflare_webhook(payload: dict, authorization: str = Header(None)) -> dict:
+    """Public webhook Campflare POSTs to when an availability alert fires.
+
+    Campflare signs every webhook POST with an HS256 JWT carrying
+    {iat, notification_id} in the `Authorization` header, using the
+    shared secret from our account page. We must verify that signature
+    before trusting the payload — without this, anyone who discovers the
+    endpoint URL could spoof campground-opening alerts.
+    """
+    import base64
+    import os
+    import jwt  # pyjwt
     from src.workflows.webhook_handler import handle_alert
+
+    secret_b64 = os.environ.get("CAMPFLARE_JWT_SECRET")
+    if not secret_b64:
+        raise HTTPException(status_code=500, detail="CAMPFLARE_JWT_SECRET not configured")
+
+    # Campflare's shared secret is distributed as a base64 string; HMAC uses the
+    # decoded bytes. Verifying with the raw string yields "Signature verification
+    # failed" even though the fingerprint looks right.
+    secret_bytes = base64.urlsafe_b64decode(secret_b64 + "==")
+
+    token = authorization or ""
+    if token.lower().startswith("bearer "):
+        token = token[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail="missing authorization header")
+
+    try:
+        jwt.decode(token, secret_bytes, algorithms=["HS256"])
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(status_code=401, detail=f"invalid jwt: {e}")
+
     return handle_alert(payload)

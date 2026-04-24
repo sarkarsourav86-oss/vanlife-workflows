@@ -47,6 +47,24 @@ When adding new workflows, mirror this split and register a new Modal function (
 - The client is a context manager — always use `with CampflareClient() as client:` so the underlying `httpx.Client` closes.
 - `AvailabilityFilter` uses `date_ranges: list[DateRange]` (with `starting_date`/`ending_date`/`nights` per range) — **not** flat top-level `start_date`/`end_date`/`nights`. The server rejects the flat shape with `missing field date_ranges`.
 - `status="open"` combined with `kind="established"` on `CampgroundSearchRequest` intersects too narrowly and returns zero results against real data. Each works individually; together they don't. Avoid the combo.
+- Alert endpoints don't follow a single convention: `POST /alert/create`, `GET /alert/{id}`, `POST /alert/{id}/cancel`, `POST /alert/{id}/test`. Don't normalize them into a single pattern — the server will 404/405 in surprising ways.
+- Webhook payloads are one-notification-per-POST — a flat dict with `campground_name`, `campsite_name`, `reservation_url`, `date_range: {starting_date, nights}`, `metadata`, etc. Not a nested `openings[]` array. Campflare fans out multiple matches as multiple webhook POSTs.
+
+### Webhook JWT verification
+
+Campflare signs every webhook with an HS256 JWT carrying `{event, notification_id, iat}` in the `Authorization` header (no `Bearer ` prefix). The shared secret is set on the account page at https://campflare.com/platform and must also be in `CAMPFLARE_JWT_SECRET` (both `.env` locally and the `campflare` Modal secret).
+
+Gotcha: the secret is distributed as a **base64 string**, but Campflare signs with the **decoded bytes**. Passing the raw string to `jwt.decode` produces `"Signature verification failed"` even when the secret "looks right". [modal_app.py](modal_app.py) does `base64.urlsafe_b64decode(secret + "==")` before verification — don't remove that.
+
+### Modal deploys
+
+Default rolling deploys can serve stale code when only files under `src/` change (the image hash doesn't move, so old containers keep running). If a deploy looks like it succeeded but the behavior didn't change, use:
+
+```
+python -m modal deploy modal_app.py --strategy recreate
+```
+
+This terminates running containers and forces new ones to pick up the fresh source mount.
 
 ### LLM cost tracking
 
