@@ -30,6 +30,7 @@ image = (
         "python-dotenv>=1.0",
         "fastapi>=0.115",
         "pyjwt>=2.9",
+        "pillow>=10",
     )
     .add_local_python_source("src")
 )

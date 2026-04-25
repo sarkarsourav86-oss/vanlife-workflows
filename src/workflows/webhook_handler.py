@@ -27,6 +27,9 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from ..discord import availability_embed, post_to_discord
+from ..starlink_score import get_starlink_score
+
+_SCORE_EMOJI = {"good": "🛰️ Good", "marginal": "🛰️ Marginal", "poor": "🛰️ Poor"}
 
 
 def _parse_date(value: Any) -> date:
@@ -58,6 +61,7 @@ def handle_alert(payload: dict) -> dict:
         return {"status": "skipped", "reason": "no weekday nights in window"}
 
     cg_name = payload.get("campground_name") or "Unknown campground"
+    cg_id = payload.get("campground_id")
     campsite = payload.get("campsite_name")
     end = start + timedelta(days=nights)
     dates_str = f"{start.strftime('%b %d')} -> {end.strftime('%b %d, %Y')}"
@@ -79,6 +83,23 @@ def handle_alert(payload: dict) -> dict:
         embed["fields"].append({"name": "Site", "value": campsite, "inline": True})
     if park:
         embed["fields"].append({"name": "Park", "value": park, "inline": True})
+
+    # Optional Starlink suitability score. Failures here must not block the alert.
+    # Coordinates are looked up from Campflare on first use and cached.
+    if cg_id:
+        try:
+            score = get_starlink_score(
+                campground_id=cg_id,
+                campground_name=cg_name,
+            )
+        except Exception:
+            score = None
+        if score is not None:
+            embed["fields"].append({
+                "name": "Starlink",
+                "value": f"{_SCORE_EMOJI[score.score]} ({score.confidence} confidence)\n{score.reasoning}",
+                "inline": False,
+            })
 
     post_to_discord(embeds=[embed])
     return {"status": "posted", "campground": cg_name, "start": start.isoformat(), "nights": nights}
