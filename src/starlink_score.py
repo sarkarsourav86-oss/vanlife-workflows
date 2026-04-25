@@ -251,9 +251,11 @@ def get_starlink_score(
         cached = cache.get(campground_id)
         if cached:
             try:
+                print(f"[starlink_score] cache HIT: {campground_id}")
                 return StarlinkScore.model_validate(cached)
             except Exception:
                 pass  # corrupt cache entry; recompute
+        print(f"[starlink_score] cache MISS: {campground_id}")
 
     if lat is None or lng is None:
         coords = _lookup_coords(campground_id)

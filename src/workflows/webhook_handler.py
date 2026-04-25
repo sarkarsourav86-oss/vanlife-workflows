@@ -23,6 +23,7 @@ multiple times, producing duplicate Discord messages.
 
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -30,6 +31,25 @@ from ..discord import availability_embed, post_to_discord
 from ..starlink_score import get_starlink_score
 
 _SCORE_EMOJI = {"good": "🛰️ Good", "marginal": "🛰️ Marginal", "poor": "🛰️ Poor"}
+
+
+def _record_seen_alert(alert_id: str, metadata: dict) -> None:
+    """Log an alert_id to the `seen-alert-ids` Modal Dict the first time we see it.
+
+    Campflare has no list-alerts API, so this is the only way to discover orphan
+    alert IDs we've lost track of. Failures here must never block the webhook.
+    """
+    try:
+        import modal
+        seen = modal.Dict.from_name("seen-alert-ids", create_if_missing=True)
+        if alert_id not in seen:
+            seen[alert_id] = {
+                "first_seen": time.time(),
+                "workflow": metadata.get("workflow"),
+                "park": metadata.get("park"),
+            }
+    except Exception:
+        pass
 
 
 def _parse_date(value: Any) -> date:
@@ -49,6 +69,9 @@ def _has_weekday_night(start: date, nights: int) -> bool:
 def handle_alert(payload: dict) -> dict:
     """Entry point for webhook POSTs. Returns a small summary for logging."""
     metadata = payload.get("metadata") or {}
+    aid = payload.get("alert_id")
+    if aid:
+        _record_seen_alert(aid, metadata)
     date_range = payload.get("date_range") or {}
     start_raw = date_range.get("starting_date") or date_range.get("start_date")
     if not start_raw:
