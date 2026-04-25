@@ -4,6 +4,9 @@ Deploy: `modal deploy modal_app.py`
 
 Provides:
   - `refresh_mn_alert` — daily cron that (re)creates the MN weekday alert.
+  - `np_finder` — manual run-once-and-forget workflow that creates one
+    Campflare alert per configured National Park. Re-running rotates the
+    alerts (cancel old, create fresh) using a Modal Dict for state.
   - `campflare_webhook` — public HTTPS endpoint for Campflare alerts to POST to.
     After first deploy, Modal prints a URL like
       https://<user>--vanlife-workflows-campflare-webhook.modal.run
@@ -46,6 +49,42 @@ def refresh_mn_alert() -> dict:
     from src.workflows.mn_weekday_finder import main as run_finder
     run_finder(dry_run=False)
     return {"status": "ok"}
+
+
+# Modal Dict persists between runs. Keyed by park name, value is the alert ID.
+np_alerts_state = modal.Dict.from_name("np-camping-alerts", create_if_missing=True)
+
+
+@app.function(secrets=secrets)
+def np_finder(dry_run: bool = False) -> dict:
+    """Rotate Campflare alerts for the configured National Parks.
+
+    Cancels every alert ID in the `np-camping-alerts` Modal Dict, then creates
+    fresh alerts for each park and writes the new IDs back. Run-once-and-forget
+    — Campflare keeps watching for the alerts' full date window without further
+    cron support. Re-run only when you want to re-arm or change the park list.
+
+    Invoke: `python -m modal run modal_app.py::np_finder`
+    Dry run: `python -m modal run modal_app.py::np_finder --dry-run`
+    """
+    import os
+    from src.workflows.np_camping_finder import run
+
+    previous: dict[str, str] = dict(np_alerts_state.items())
+    new_state = run(
+        state=previous,
+        webhook_override_url=os.environ.get("CAMPFLARE_WEBHOOK_URL") or None,
+        dry_run=dry_run,
+    )
+
+    if not dry_run:
+        # Replace the dict's contents with the fresh state.
+        for key in list(np_alerts_state.keys()):
+            del np_alerts_state[key]
+        for park_name, alert_id in new_state.items():
+            np_alerts_state[park_name] = alert_id
+
+    return {"alerts": new_state, "count": len(new_state)}
 
 
 @app.function(secrets=secrets)
