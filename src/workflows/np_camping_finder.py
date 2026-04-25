@@ -38,6 +38,12 @@ class NationalPark:
     bbox: BoundingBox
 
 
+# Minimum consecutive nights we'd actually drive out for. Applied both to the
+# search filter (only finds sites with >= MIN_NIGHTS available) and to the
+# alert's nights-per-range (so webhook payloads carry the same constraint).
+MIN_NIGHTS = 2
+
+
 PARKS: list[NationalPark] = [
     NationalPark(
         name="Glacier",
@@ -95,7 +101,7 @@ def find_park_campgrounds(client: CampflareClient, park: NationalPark, limit: in
         campsite_kinds=["standard", "rv", "tent-only"],
         limit=limit,
         availability=AvailabilityFilter(
-            date_ranges=[DateRange(starting_date=start, ending_date=end, nights=1)],
+            date_ranges=[DateRange(starting_date=start, ending_date=end, nights=MIN_NIGHTS)],
             status=["available"],
         ),
     )
@@ -108,11 +114,15 @@ def create_park_alert(
     campground_ids: list[str],
     webhook_override_url: str | None = None,
 ) -> dict:
-    """Create one Campflare alert covering this park's campgrounds for the full season."""
+    """Create one Campflare alert covering this park's campgrounds for the full season.
+
+    The alert enumerates starting days only up to `end - MIN_NIGHTS` so a 2-night
+    window starting on the last day doesn't bleed into October.
+    """
     start, end = season_window()
     req = CreateAlertRequest(
         parameters=AvailabilityFilter(
-            date_ranges=daily_ranges(start, end, nights=1),
+            date_ranges=daily_ranges(start, end - timedelta(days=MIN_NIGHTS - 1), nights=MIN_NIGHTS),
             status=["available"],
             campsite_kinds=["standard", "rv", "tent-only"],
         ),
