@@ -15,8 +15,10 @@ Real webhook payload shape (one notification = one availability):
       "metadata": {"workflow": "mn_weekday_finder", "weekdays_only": true, ...}
     }
 
-We post-filter for weekday nights (Mon-Thu) when metadata flags it, format
-the payload with Haiku, and post a rich embed to Discord.
+Formatting is deterministic — no LLM call in the hot path. The Anthropic
+free tier is 5 req/min; under bursty webhook volume an LLM-formatted handler
+hit RateLimitError, raised, and Campflare retried the same notification
+multiple times, producing duplicate Discord messages.
 """
 
 from __future__ import annotations
@@ -24,7 +26,6 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from ..alert_formatter import format_alert
 from ..discord import availability_embed, post_to_discord
 
 
@@ -56,29 +57,28 @@ def handle_alert(payload: dict) -> dict:
     if metadata.get("weekdays_only") and not _has_weekday_night(start, nights):
         return {"status": "skipped", "reason": "no weekday nights in window"}
 
-    formatted = format_alert(payload)
-
     cg_name = payload.get("campground_name") or "Unknown campground"
     campsite = payload.get("campsite_name")
     end = start + timedelta(days=nights)
-    dates_str = f"{start.isoformat()} -> {end.isoformat()}"
+    dates_str = f"{start.strftime('%b %d')} -> {end.strftime('%b %d, %Y')}"
+    park = metadata.get("park")
+
+    summary_parts = [f"{cg_name} has availability"]
+    if park:
+        summary_parts.append(f"in {park}")
+    summary = " ".join(summary_parts) + f" ({nights} night{'s' if nights != 1 else ''})"
 
     embed = availability_embed(
         campground_name=cg_name,
         dates=dates_str,
         nights=nights,
         booking_url=payload.get("reservation_url"),
-        summary=formatted.summary,
+        summary=summary,
     )
     if campsite:
         embed["fields"].append({"name": "Site", "value": campsite, "inline": True})
-    embed["fields"].append({"name": "Urgency", "value": formatted.urgency, "inline": True})
-    if formatted.highlights:
-        embed["fields"].append(
-            {"name": "Highlights",
-             "value": "\n".join(f"- {h}" for h in formatted.highlights),
-             "inline": False}
-        )
+    if park:
+        embed["fields"].append({"name": "Park", "value": park, "inline": True})
 
     post_to_discord(embeds=[embed])
     return {"status": "posted", "campground": cg_name, "start": start.isoformat(), "nights": nights}
