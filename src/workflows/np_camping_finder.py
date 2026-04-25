@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from ..campflare import (
     AvailabilityFilter,
@@ -67,16 +67,29 @@ PARKS: list[NationalPark] = [
 ]
 
 
-def summer_window(today: date | None = None) -> tuple[date, date]:
-    """Return (start, end) covering this summer or next summer if past August."""
+def season_window(today: date | None = None) -> tuple[date, date]:
+    """Return (start, end) covering Jun 1 - Sep 30 of this year, or next year if past September."""
     today = today or date.today()
-    year = today.year if today.month <= 8 else today.year + 1
-    return date(year, 6, 1), date(year, 8, 31)
+    year = today.year if today.month <= 9 else today.year + 1
+    return date(year, 6, 1), date(year, 9, 30)
+
+
+def daily_ranges(start: date, end: date, nights: int = 1) -> list[DateRange]:
+    """One DateRange per day in [start, end], because Campflare drops `ending_date`
+    on /alert/create and only watches the single `starting_date`. To cover a window
+    we have to enumerate every starting day explicitly.
+    """
+    ranges: list[DateRange] = []
+    d = start
+    while d <= end:
+        ranges.append(DateRange(starting_date=d, nights=nights))
+        d += timedelta(days=1)
+    return ranges
 
 
 def find_park_campgrounds(client: CampflareClient, park: NationalPark, limit: int = 12) -> list:
-    """Search for up to `limit` campgrounds within the park's bbox with summer availability."""
-    start, end = summer_window()
+    """Search for up to `limit` campgrounds within the park's bbox with season availability."""
+    start, end = season_window()
     req = CampgroundSearchRequest(
         bbox=park.bbox,
         campsite_kinds=["standard", "rv", "tent-only"],
@@ -95,11 +108,11 @@ def create_park_alert(
     campground_ids: list[str],
     webhook_override_url: str | None = None,
 ) -> dict:
-    """Create one Campflare alert covering this park's campgrounds."""
-    start, end = summer_window()
+    """Create one Campflare alert covering this park's campgrounds for the full season."""
+    start, end = season_window()
     req = CreateAlertRequest(
         parameters=AvailabilityFilter(
-            date_ranges=[DateRange(starting_date=start, ending_date=end, nights=1)],
+            date_ranges=daily_ranges(start, end, nights=1),
             status=["available"],
             campsite_kinds=["standard", "rv", "tent-only"],
         ),
