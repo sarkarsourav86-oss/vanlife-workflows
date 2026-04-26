@@ -89,7 +89,7 @@ def handle_alert(payload: dict) -> dict:
     cg_id = payload.get("campground_id")
     campsite = payload.get("campsite_name")
     end = start + timedelta(days=nights)
-    dates_str = f"{start.strftime('%b %d')} -> {end.strftime('%b %d, %Y')}"
+    dates_str = f"{start.strftime('%a %b %d')} -> {end.strftime('%a %b %d, %Y')}"
 
     # Resolve a human-readable region label. New alerts (post-refactor) set
     # `metadata.region` to a slug; old alerts (pre-refactor np_camping_finder)
