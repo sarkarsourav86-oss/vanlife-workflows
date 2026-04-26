@@ -176,6 +176,38 @@ REGIONS: dict[str, Region] = {
         min_nights=2,
         campsite_kinds=("standard", "rv", "tent-only"),
     ),
+    # Beartooth Pass scenic byway corridor (Red Lodge MT -> Cooke City MT,
+    # over the 10,947ft pass). Custer Gallatin NF (MT) + Shoshone NF (WY).
+    # Iconic high-alpine drive; pass is typically open Memorial Day to mid-
+    # October.
+    #
+    # The famous WY-side high-alpine campgrounds (Beartooth Lake, Island
+    # Lake, Soda Butte, Crazy Creek, Fox Creek, Emerald Lake) are marked
+    # status=closed / no availability data on Campflare's side — Campflare
+    # can't watch them, so they're omitted here. Coverage is the MT-side
+    # reservable USFS sites along the Red Lodge approach.
+    "beartooth": Region(
+        name="beartooth",
+        display_name="Beartooth Pass corridor (MT)",
+        bbox=BoundingBox(
+            min_latitude=44.9, max_latitude=45.3,
+            min_longitude=-109.95, max_longitude=-109.20,
+        ),
+        active_months=(6, 7, 8, 9),
+        weekdays_only=False,
+        min_nights=1,
+        campsite_kinds=("standard", "rv", "tent-only"),
+        exclude_name_substrings=VANLIFE_EXCLUDE,
+        priority_ids=(
+            "greenough-lake-771",
+            "limber-pine-772",
+            "parkside-773",
+            "sheridan-775",
+            "rattin-campground-774",
+            "basin-montana-campground-770",
+            "cascade-771",
+        ),
+    ),
     # Black Hills NF + Spearfish Canyon (one region — Spearfish Canyon is the
     # northern part of the same forest). Spearfish Canyon's USFS sites
     # (Hanna, Rod and Gun, Timon, Strawberry) are first-come-first-served
