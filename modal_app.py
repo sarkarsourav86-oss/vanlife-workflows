@@ -21,24 +21,43 @@ from __future__ import annotations
 import modal
 from fastapi import Header, HTTPException, Request
 
-image = (
-    modal.Image.debian_slim(python_version="3.11")
+# Two images, scoped per-function to keep cold-start fast on lean paths.
+#
+# endpoint_image: small (no LLM/vision deps). Used by HTTP endpoints whose
+#   only job is to verify a signature and immediately spawn a worker.
+#   Cold-start matters here because Discord enforces a 3-second reply
+#   deadline on interactions.
+# worker_image: extends endpoint_image with anthropic/langchain/pillow.
+#   Used by functions that score images, call the LLM, or otherwise need
+#   the heavy stack. Cold-start time is irrelevant — we already deferred.
+#
+# Industry pattern: smallest viable image per function. Same final-artifact
+# concept as Dockerfiles, just declared in Python.
+
+_base_image = modal.Image.debian_slim(python_version="3.11").pip_install(
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "fastapi>=0.115",
+    "pyjwt>=2.9",        # Campflare webhook JWT verification
+    "pynacl>=1.5",       # Discord interactions Ed25519 verification
+    "python-dotenv>=1.0",
+)
+
+# add_local_python_source MUST be last in each chain — Modal warns otherwise.
+endpoint_image = _base_image.add_local_python_source("src")
+
+worker_image = (
+    _base_image
     .pip_install(
-        "httpx>=0.27",
-        "pydantic>=2.7",
         "anthropic>=0.40",
         "langchain>=0.3",
         "langchain-anthropic>=0.3",
-        "python-dotenv>=1.0",
-        "fastapi>=0.115",
-        "pyjwt>=2.9",
         "pillow>=10",
-        "pynacl>=1.5",
     )
     .add_local_python_source("src")
 )
 
-app = modal.App("vanlife-workflows", image=image)
+app = modal.App("vanlife-workflows")
 
 secrets = [
     modal.Secret.from_name("campflare"),   # CAMPFLARE_API_KEY, CAMPFLARE_JWT_SECRET, optional CAMPFLARE_WEBHOOK_URL
@@ -53,7 +72,7 @@ region_alerts_state = modal.Dict.from_name("region-alerts", create_if_missing=Tr
 
 # ---------- Work functions (called via .spawn.aio() from interaction handler) ----------
 
-@app.function(secrets=secrets, timeout=600)
+@app.function(image=endpoint_image, secrets=secrets, timeout=600, retries=0)
 def refresh_region(region_name: str, interaction_token: str | None = None) -> dict:
     """Rotate the alert for one region. PATCHes Discord followup if token given."""
     import os
@@ -94,7 +113,7 @@ def refresh_region(region_name: str, interaction_token: str | None = None) -> di
     return {"region": region_name, "alert_id": new_id, "message": msg}
 
 
-@app.function(secrets=secrets, timeout=120)
+@app.function(image=endpoint_image, secrets=secrets, timeout=120, retries=0)
 def status_report(interaction_token: str | None = None) -> dict:
     """Build and post a status report on every tracked region."""
     import os
@@ -110,7 +129,7 @@ def status_report(interaction_token: str | None = None) -> dict:
 
 # ---------- Public HTTP endpoints ----------
 
-@app.function(secrets=secrets)
+@app.function(image=worker_image, secrets=secrets)
 @modal.fastapi_endpoint(method="POST")
 def campflare_webhook(payload: dict, authorization: str = Header(None)) -> dict:
     """Public webhook Campflare POSTs to when an availability alert fires.
@@ -143,7 +162,7 @@ def campflare_webhook(payload: dict, authorization: str = Header(None)) -> dict:
     return handle_alert(payload)
 
 
-@app.function(secrets=secrets)
+@app.function(image=endpoint_image, secrets=secrets)
 @modal.fastapi_endpoint(method="POST")
 async def discord_interactions(
     request: Request,
