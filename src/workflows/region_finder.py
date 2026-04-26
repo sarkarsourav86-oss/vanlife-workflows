@@ -176,6 +176,39 @@ REGIONS: dict[str, Region] = {
         min_nights=2,
         campsite_kinds=("standard", "rv", "tent-only"),
     ),
+    # Black Hills NF + Spearfish Canyon (one region — Spearfish Canyon is the
+    # northern part of the same forest). Spearfish Canyon's USFS sites
+    # (Hanna, Rod and Gun, Timon, Strawberry) are first-come-first-served
+    # only — no reservations means nothing for Campflare to watch, so they're
+    # silently absent from results. Coverage focuses on the central Black
+    # Hills reservable lakes (Pactola, Sheridan, Horsethief, Dalton, Roubaix).
+    "black-hills": Region(
+        name="black-hills",
+        display_name="Black Hills NF (SD)",
+        bbox=BoundingBox(
+            min_latitude=43.4, max_latitude=44.65,
+            min_longitude=-104.10, max_longitude=-103.20,
+        ),
+        active_months=(5, 6, 7, 8, 9, 10),
+        weekdays_only=False,
+        min_nights=1,
+        campsite_kinds=("standard", "rv", "tent-only"),
+        exclude_name_substrings=VANLIFE_EXCLUDE,
+        priority_ids=(
+            "pactola-reservoir-campground-078",
+            "sheridan-lake-300",
+            "horsethief-lake-campground-840",
+            "dalton-lake-campground-434",
+            "roubaix-lake-365",
+            "elk-mountain-campground-878",
+            "boxelder-forks-campground-184",
+            "comanche-park-838",
+            "bismark-lake-837",
+            "oreville-campground-841",
+            "dutchman-839",
+            "cottonwood-springs-campground-432",
+        ),
+    ),
 }
 
 
