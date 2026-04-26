@@ -1,15 +1,18 @@
 """One-off script: register slash commands with Discord.
 
-Run this whenever you add/remove/rename commands. Idempotent — Discord
-upserts by name. Uses the bot token from .env (DISCORD_BOT_TOKEN), which
-never goes to Modal.
+Run this whenever you add/remove/rename commands. PUT bulk-overwrites the
+whole command list, so old commands not in COMMANDS get deleted. Idempotent.
 
 Usage:
   python -m scripts.register_discord_commands              # global (slow propagation)
   python -m scripts.register_discord_commands --guild GID  # per-guild (instant)
 
-Find your guild ID: in Discord, enable Developer Mode (Settings → Advanced),
-right-click your server icon → Copy Server ID.
+Find your guild ID: Discord -> User Settings -> Advanced -> Developer Mode on,
+then right-click your server icon -> Copy Server ID.
+
+Note: `/refresh region:<name>` uses Discord's autocomplete. The region
+parameter sets `autocomplete: true` here; the actual choice list comes
+from the discord_interactions endpoint at runtime (interaction type 4).
 """
 
 from __future__ import annotations
@@ -22,14 +25,18 @@ from dotenv import load_dotenv
 
 COMMANDS = [
     {
-        "name": "refresh-mn",
-        "description": "Recreate the MN weekday-finder Campflare alert (rotates the slate).",
-        "type": 1,
-    },
-    {
-        "name": "refresh-np",
-        "description": "Rotate Campflare alerts for all configured National Parks.",
-        "type": 1,
+        "name": "refresh",
+        "description": "Rotate the Campflare alert for one region (cancel previous, create fresh).",
+        "type": 1,  # CHAT_INPUT
+        "options": [
+            {
+                "name": "region",
+                "description": "Which region to refresh.",
+                "type": 3,  # STRING
+                "required": True,
+                "autocomplete": True,
+            },
+        ],
     },
     {
         "name": "status",
@@ -48,15 +55,17 @@ def register(app_id: str, bot_token: str, guild_id: str | None) -> None:
         scope = "global"
 
     headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
-
-    # PUT bulk-overwrites the whole command list — old commands not in COMMANDS get deleted.
     r = httpx.put(url, headers=headers, json=COMMANDS, timeout=30.0)
     r.raise_for_status()
 
     registered = r.json()
     print(f"Registered {len(registered)} {scope} commands:")
     for c in registered:
-        print(f"  /{c['name']}: {c['description']}")
+        opts = c.get("options") or []
+        opt_str = ""
+        if opts:
+            opt_str = " (" + ", ".join(o["name"] for o in opts) + ")"
+        print(f"  /{c['name']}{opt_str}: {c['description']}")
 
 
 if __name__ == "__main__":

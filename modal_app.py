@@ -6,8 +6,10 @@ Force fresh containers: `modal deploy modal_app.py --strategy recreate`
 Provides:
   - `campflare_webhook` — public HTTPS endpoint for Campflare alert webhooks.
   - `discord_interactions` — public HTTPS endpoint for Discord slash commands.
-  - `refresh_mn`, `refresh_np`, `status_report` — work functions invoked by
-    Discord interactions via Modal's .spawn() to stay under the 3s reply limit.
+    Handles both APPLICATION_COMMAND (type 2) and APPLICATION_COMMAND_AUTOCOMPLETE
+    (type 4).
+  - `refresh_region(region_name)` and `status_report` — work functions
+    invoked via Modal's .spawn.aio() to stay under Discord's 3s reply limit.
 
 After first deploy, paste the discord_interactions URL into the
 "Interactions Endpoint URL" box on the Discord developer portal
@@ -44,84 +46,61 @@ secrets = [
     modal.Secret.from_name("discord"),     # DISCORD_WEBHOOK_URL, DISCORD_PUBLIC_KEY, DISCORD_APP_ID
 ]
 
-# Modal Dicts: persisted alert-ID state, one per workflow.
-np_alerts_state = modal.Dict.from_name("np-camping-alerts", create_if_missing=True)
-mn_alerts_state = modal.Dict.from_name("mn-weekday-alerts", create_if_missing=True)
+# Unified state Dict: {region_name: alert_id}. Replaces the previous
+# per-workflow dicts (mn-weekday-alerts, np-camping-alerts).
+region_alerts_state = modal.Dict.from_name("region-alerts", create_if_missing=True)
 
 
-# ---------- Work functions (called via .spawn() from interaction handler) ----------
+# ---------- Work functions (called via .spawn.aio() from interaction handler) ----------
 
 @app.function(secrets=secrets, timeout=600)
-def refresh_mn(interaction_token: str | None = None) -> dict:
-    """Rotate the MN weekday-finder alert. PATCHes Discord followup if token given."""
+def refresh_region(region_name: str, interaction_token: str | None = None) -> dict:
+    """Rotate the alert for one region. PATCHes Discord followup if token given."""
     import os
-    from src.workflows.mn_weekday_finder import run
+    from src.workflows.region_finder import REGIONS, run
 
-    previous = mn_alerts_state.get("mn_weekday")
+    if region_name not in REGIONS:
+        msg = f"Unknown region: `{region_name}`. Known: {sorted(REGIONS.keys())}"
+        if interaction_token:
+            from src.discord_interactions import send_followup
+            send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
+        return {"error": msg}
+
+    region = REGIONS[region_name]
+    previous = region_alerts_state.get(region_name)
+
     new_id = run(
+        region_name=region_name,
         previous_alert_id=previous,
         webhook_override_url=os.environ.get("CAMPFLARE_WEBHOOK_URL") or None,
         dry_run=False,
     )
 
     if new_id:
-        mn_alerts_state["mn_weekday"] = new_id
-        msg = f"MN weekday alert refreshed: `{new_id}`"
+        region_alerts_state[region_name] = new_id
+        msg = f"**{region.display_name}** alert refreshed: `{new_id}`"
     elif previous:
-        # Cancelled but no candidates found.
         try:
-            del mn_alerts_state["mn_weekday"]
+            del region_alerts_state[region_name]
         except KeyError:
             pass
-        msg = "MN weekday alert cancelled. No candidates found this run."
+        msg = f"**{region.display_name}** alert cancelled. No candidates found."
     else:
-        msg = "No candidates found and no previous alert to cancel."
+        msg = f"**{region.display_name}**: no candidates and no previous alert."
 
     if interaction_token:
         from src.discord_interactions import send_followup
         send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
-    return {"alert_id": new_id, "message": msg}
-
-
-@app.function(secrets=secrets, timeout=600)
-def refresh_np(interaction_token: str | None = None) -> dict:
-    """Rotate Campflare alerts for every configured National Park."""
-    import os
-    from src.workflows.np_camping_finder import run
-
-    previous: dict[str, str] = dict(np_alerts_state.items())
-    new_state = run(
-        state=previous,
-        webhook_override_url=os.environ.get("CAMPFLARE_WEBHOOK_URL") or None,
-        dry_run=False,
-    )
-
-    for key in list(np_alerts_state.keys()):
-        del np_alerts_state[key]
-    for park_name, alert_id in new_state.items():
-        np_alerts_state[park_name] = alert_id
-
-    msg_lines = [f"Rotated {len(new_state)} National Park alerts:"]
-    for park, aid in new_state.items():
-        msg_lines.append(f"- **{park}**: `{aid}`")
-    msg = "\n".join(msg_lines)
-
-    if interaction_token:
-        from src.discord_interactions import send_followup
-        send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
-    return {"alerts": new_state, "count": len(new_state)}
+    return {"region": region_name, "alert_id": new_id, "message": msg}
 
 
 @app.function(secrets=secrets, timeout=120)
 def status_report(interaction_token: str | None = None) -> dict:
-    """Build and post a status report on every tracked alert."""
+    """Build and post a status report on every tracked region."""
     import os
     from src.workflows.status import build_status_report
 
-    report = build_status_report(
-        np_state=dict(np_alerts_state.items()),
-        mn_state=dict(mn_alerts_state.items()),
-    )
+    report = build_status_report(state=dict(region_alerts_state.items()))
 
     if interaction_token:
         from src.discord_interactions import send_followup
@@ -171,15 +150,15 @@ async def discord_interactions(
     x_signature_ed25519: str = Header(None),
     x_signature_timestamp: str = Header(None),
 ) -> dict:
-    """Public endpoint Discord posts every slash-command invocation to.
+    """Discord interactions endpoint. Handles PING (1), APPLICATION_COMMAND (2),
+    and APPLICATION_COMMAND_AUTOCOMPLETE (4).
 
-    Discord requires a response within 3s. We verify the Ed25519 signature,
-    PONG to the type-1 PING handshake, and for type-2 application commands
-    return a deferred response (type 5) immediately while Modal's .spawn()
-    runs the actual work and PATCHes the followup.
+    Discord requires a response within 3s. Slow handlers return type 5
+    (deferred) and run via .spawn.aio() that PATCHes a followup later.
     """
     import os
     from src.discord_interactions import verify_signature
+    from src.workflows.region_finder import REGIONS
 
     body = await request.body()
     public_key = os.environ.get("DISCORD_PUBLIC_KEY")
@@ -194,23 +173,41 @@ async def discord_interactions(
     interaction = await request.json()
     itype = interaction.get("type")
 
-    # PING handshake — Discord pings the URL when you save it in the portal,
-    # and periodically thereafter. PONG is type 1.
+    # PING handshake.
     if itype == 1:
         return {"type": 1}
 
-    # Type 2 = APPLICATION_COMMAND
-    if itype == 2:
-        name = (interaction.get("data") or {}).get("name")
-        token = interaction.get("token")
+    data = interaction.get("data") or {}
+    name = data.get("name")
 
-        # Type 5 = DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE. No `data` allowed —
-        # the actual content comes from the followup PATCH on @original.
-        if name == "refresh-mn":
-            await refresh_mn.spawn.aio(interaction_token=token)
-            return {"type": 5}
-        if name == "refresh-np":
-            await refresh_np.spawn.aio(interaction_token=token)
+    # Type 4 = APPLICATION_COMMAND_AUTOCOMPLETE. Discord asks "what choices
+    # should I show?" for the focused parameter. We respond synchronously
+    # with up to 25 choices.
+    if itype == 4:
+        if name == "refresh":
+            options = data.get("options") or []
+            focused_value = ""
+            for opt in options:
+                if opt.get("focused") and opt.get("name") == "region":
+                    focused_value = (opt.get("value") or "").lower()
+                    break
+            choices = [
+                {"name": r.display_name, "value": r.name}
+                for r in REGIONS.values()
+                if focused_value in r.name.lower() or focused_value in r.display_name.lower()
+            ][:25]
+            return {"type": 8, "data": {"choices": choices}}
+        return {"type": 8, "data": {"choices": []}}
+
+    # Type 2 = APPLICATION_COMMAND.
+    if itype == 2:
+        token = interaction.get("token")
+        if name == "refresh":
+            options = {opt["name"]: opt.get("value") for opt in (data.get("options") or [])}
+            region_name = options.get("region")
+            if not region_name:
+                return {"type": 4, "data": {"content": "Missing `region` parameter."}}
+            await refresh_region.spawn.aio(region_name=region_name, interaction_token=token)
             return {"type": 5}
         if name == "status":
             await status_report.spawn.aio(interaction_token=token)
