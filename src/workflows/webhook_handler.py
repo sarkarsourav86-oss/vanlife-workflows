@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from ..discord import availability_embed, post_to_discord
+from ..site_photo import get_site_info
 from ..starlink_score import get_starlink_score
 from .region_finder import REGIONS
 
@@ -121,6 +122,22 @@ def handle_alert(payload: dict) -> dict:
         embed["fields"].append({"name": "Site", "value": campsite, "inline": True})
     if region_label:
         embed["fields"].append({"name": "Region", "value": region_label, "inline": True})
+
+    # Optional recreation.gov site info: hero photo + shade attribute. Augments
+    # the embed without replacing Starlink scoring (different signals — photo
+    # shows the pad, shade is rec.gov's own metadata, Starlink scoring is
+    # satellite-derived sky view). Returns None for non-recreation.gov listings
+    # (state parks etc.) and for any HTTP/parse failure — silently skipped.
+    reservation_url = payload.get("reservation_url") or ""
+    try:
+        site_info = get_site_info(reservation_url, campsite)
+    except Exception:
+        site_info = None
+    if site_info is not None:
+        if site_info.photo_url:
+            embed["image"] = {"url": site_info.photo_url}
+        if site_info.shade:
+            embed["fields"].append({"name": "Shade", "value": site_info.shade, "inline": True})
 
     # Optional Starlink suitability score. Failures here must not block the alert.
     # Coordinates are looked up from Campflare on first use and cached.
