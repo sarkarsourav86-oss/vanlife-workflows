@@ -156,5 +156,17 @@ def handle_alert(payload: dict) -> dict:
                 "inline": False,
             })
 
+    # Footer carries truncated notification + alert IDs so duplicates can be
+    # diagnosed at a glance: same notification_id => Campflare retried; different
+    # notification_ids on similar alerts => orphan alerts firing in parallel.
+    notif_id = payload.get("notification_id") or ""
+    footer_parts: list[str] = []
+    if notif_id:
+        footer_parts.append(f"notif: {notif_id[:8]}")
+    if aid:
+        footer_parts.append(f"alert: {aid[:8]}")
+    if footer_parts:
+        embed["footer"] = {"text": " • ".join(footer_parts)}
+
     post_to_discord(embeds=[embed])
     return {"status": "posted", "campground": cg_name, "start": start.isoformat(), "nights": nights}
