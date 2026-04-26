@@ -29,6 +29,7 @@ from typing import Any
 
 from ..discord import availability_embed, post_to_discord
 from ..starlink_score import get_starlink_score
+from .region_finder import REGIONS
 
 _SCORE_EMOJI = {"good": "🛰️ Good", "marginal": "🛰️ Marginal", "poor": "🛰️ Poor"}
 
@@ -88,11 +89,22 @@ def handle_alert(payload: dict) -> dict:
     campsite = payload.get("campsite_name")
     end = start + timedelta(days=nights)
     dates_str = f"{start.strftime('%b %d')} -> {end.strftime('%b %d, %Y')}"
-    park = metadata.get("park")
+
+    # Resolve a human-readable region label. New alerts (post-refactor) set
+    # `metadata.region` to a slug; old alerts (pre-refactor np_camping_finder)
+    # set `metadata.park` to a display name. Support both.
+    region_label: str | None = None
+    region_slug = metadata.get("region")
+    if region_slug and region_slug in REGIONS:
+        region_label = REGIONS[region_slug].display_name
+    elif region_slug:
+        region_label = region_slug
+    elif metadata.get("park"):
+        region_label = metadata["park"]
 
     summary_parts = [f"{cg_name} has availability"]
-    if park:
-        summary_parts.append(f"in {park}")
+    if region_label:
+        summary_parts.append(f"in {region_label}")
     summary = " ".join(summary_parts) + f" ({nights} night{'s' if nights != 1 else ''})"
 
     embed = availability_embed(
@@ -102,10 +114,13 @@ def handle_alert(payload: dict) -> dict:
         booking_url=payload.get("reservation_url"),
         summary=summary,
     )
+    # Promote region to the embed title so it's visible at a glance.
+    if region_label:
+        embed["title"] = f"🏕️  {region_label}: {cg_name}"
     if campsite:
         embed["fields"].append({"name": "Site", "value": campsite, "inline": True})
-    if park:
-        embed["fields"].append({"name": "Park", "value": park, "inline": True})
+    if region_label:
+        embed["fields"].append({"name": "Region", "value": region_label, "inline": True})
 
     # Optional Starlink suitability score. Failures here must not block the alert.
     # Coordinates are looked up from Campflare on first use and cached.
