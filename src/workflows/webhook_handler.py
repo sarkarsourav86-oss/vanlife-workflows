@@ -27,7 +27,7 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from ..discord import availability_embed, post_to_discord
+from ..discord import availability_embed, pick_webhook_url, post_to_discord
 from ..site_photo import get_site_info
 from ..starlink_score import get_starlink_score
 from .region_finder import REGIONS
@@ -168,5 +168,5 @@ def handle_alert(payload: dict) -> dict:
     if footer_parts:
         embed["footer"] = {"text": " • ".join(footer_parts)}
 
-    post_to_discord(embeds=[embed])
+    post_to_discord(embeds=[embed], webhook_url=pick_webhook_url(metadata))
     return {"status": "posted", "campground": cg_name, "start": start.isoformat(), "nights": nights}
