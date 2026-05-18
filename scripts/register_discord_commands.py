@@ -43,6 +43,25 @@ COMMANDS = [
         "description": "Show all active Campflare alerts and their state.",
         "type": 1,
     },
+    {
+        "name": "dispersed",
+        "description": "Find dispersed camping near a location (lat,lng or place name).",
+        "type": 1,
+        "options": [
+            {
+                "name": "location",
+                "description": "'lat,lng' (e.g. '47.9,-91.87') or a place name.",
+                "type": 3,
+                "required": True,
+            },
+            {
+                "name": "radius",
+                "description": "Search radius in miles (default 30).",
+                "type": 10,  # NUMBER (float)
+                "required": False,
+            },
+        ],
+    },
 ]
 
 

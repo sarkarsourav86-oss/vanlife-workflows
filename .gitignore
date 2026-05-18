@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 *.db
+IOverlanderData/
 .pytest_cache/
 .ruff_cache/
 .DS_Store

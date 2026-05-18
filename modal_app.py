@@ -69,6 +69,13 @@ secrets = [
 # per-workflow dicts (mn-weekday-alerts, np-camping-alerts).
 region_alerts_state = modal.Dict.from_name("region-alerts", create_if_missing=True)
 
+# Volume holding the iOverlander+PAD-US enriched SQLite DB. Built locally by
+# `scripts/build_dispersed_db.py` and uploaded with
+# `modal volume put dispersed-data dispersed.db /dispersed.db --force`.
+# Mounted read-only at /data in the dispersed_search worker; src/dispersed_db.py
+# reads from $DISPERSED_DB_PATH.
+dispersed_data_volume = modal.Volume.from_name("dispersed-data")
+
 
 # ---------- Work functions (called via .spawn.aio() from interaction handler) ----------
 
@@ -125,6 +132,56 @@ def status_report(interaction_token: str | None = None) -> dict:
         from src.discord_interactions import send_followup
         send_followup(os.environ["DISCORD_APP_ID"], interaction_token, report)
     return {"report": report}
+
+
+@app.function(
+    image=worker_image,
+    secrets=secrets,
+    volumes={"/data": dispersed_data_volume},
+    timeout=300,
+    retries=0,
+)
+def dispersed_search(
+    location: str,
+    radius_miles: float = 30.0,
+    interaction_token: str | None = None,
+) -> dict:
+    """Resolve location, query the dispersed-camping DB, post a Discord embed.
+
+    Uses the worker image because Starlink scoring on the top candidates is
+    a Sonnet vision call. The dispersed-data volume mounts the prebuilt SQLite
+    DB at /data/dispersed.db; we set DISPERSED_DB_PATH so src.dispersed_db
+    reads from there instead of the default cwd-relative path.
+    """
+    import os
+    os.environ["DISPERSED_DB_PATH"] = "/data/dispersed.db"
+
+    from src.workflows.dispersed_finder import (
+        build_embed,
+        enrich_with_starlink,
+        find_spots,
+        parse_location,
+    )
+
+    coords = parse_location(location)
+    if not coords:
+        msg = f"Couldn't resolve location: `{location}`. Try `lat,lng` or a place name."
+        if interaction_token:
+            from src.discord_interactions import send_followup
+            send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
+        return {"error": msg}
+
+    lat, lng = coords
+    spots = find_spots(lat, lng, radius_miles=radius_miles)
+    if spots:
+        spots = enrich_with_starlink(spots)
+    embed = build_embed(spots, origin=coords)
+
+    if interaction_token:
+        from src.discord_interactions import post_followup
+        post_followup(interaction_token, {"embeds": [embed]})
+
+    return {"location": location, "lat": lat, "lng": lng, "n_spots": len(spots)}
 
 
 # ---------- Public HTTP endpoints ----------
@@ -230,6 +287,16 @@ async def discord_interactions(
             return {"type": 5}
         if name == "status":
             await status_report.spawn.aio(interaction_token=token)
+            return {"type": 5}
+        if name == "dispersed":
+            options = {opt["name"]: opt.get("value") for opt in (data.get("options") or [])}
+            location = options.get("location")
+            if not location:
+                return {"type": 4, "data": {"content": "Missing `location` parameter."}}
+            radius = float(options.get("radius") or 30.0)
+            await dispersed_search.spawn.aio(
+                location=location, radius_miles=radius, interaction_token=token,
+            )
             return {"type": 5}
 
         return {"type": 4, "data": {"content": f"Unknown command: `{name}`"}}
