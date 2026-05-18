@@ -129,6 +129,11 @@ class CampflareClient:
             r.raise_for_status()
             return r.json() if r.content else {}
 
+    def get_campground(self, campground_id: str) -> Campground:
+        """GET /campground/{id} — fetch a single campground's full record."""
+        data = self._get(f"/campground/{campground_id}")
+        return Campground.model_validate(data)
+
     def search_campgrounds(self, req: CampgroundSearchRequest) -> list[Campground]:
         """POST /campgrounds/search — at least one filter must be set."""
         payload = req.model_dump(exclude_none=True, mode="json")
@@ -142,11 +147,19 @@ class CampflareClient:
         start_date: date,
         end_date: date,
     ) -> dict:
-        """POST /campgrounds/bulk-availability — max 25 IDs per call."""
+        """POST /campgrounds/availability — max 25 IDs per call.
+
+        Despite the natural name, the endpoint is `/campgrounds/availability`
+        (no `bulk-` prefix). `/campgrounds/bulk-availability` 404s.
+
+        Returns ``{campgrounds: [{campground_id, campsite_availability: [
+            {campsite_id, availability: {YYYY-MM-DD: "available"|"reserved"|...}}
+        ]}]}``.
+        """
         if len(campground_ids) > 25:
             raise ValueError("bulk_availability accepts at most 25 campground_ids")
         return self._post(
-            "/campgrounds/bulk-availability",
+            "/campgrounds/availability",
             {
                 "campground_ids": campground_ids,
                 "start_date": start_date.isoformat(),
