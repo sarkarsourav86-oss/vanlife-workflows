@@ -79,3 +79,38 @@ def followup_url(interaction_token: str, app_id: str | None = None) -> str:
     """Build the followup URL — useful when callers want to PATCH directly."""
     app_id = app_id or os.environ["DISCORD_APP_ID"]
     return f"https://discord.com/api/v10/webhooks/{app_id}/{interaction_token}/messages/@original"
+
+
+def post_followup(
+    interaction_token: str,
+    payload: dict,
+    app_id: str | None = None,
+) -> None:
+    """POST a followup message to the deferred-interaction webhook.
+
+    Mirrors ``send_followup`` (which is content-only) but accepts an arbitrary
+    payload — used for embeds. Retries on 404 because spawn.aio() can run
+    faster than Discord registers our type-5 reply, same race the PATCH path
+    handles. Logs the response body on non-2xx so failures are debuggable.
+    """
+    app_id = app_id or os.environ["DISCORD_APP_ID"]
+    url = f"https://discord.com/api/v10/webhooks/{app_id}/{interaction_token}"
+    delays = (0.5, 1.0, 2.0, 4.0, 8.0)  # 5 retries; total wait <= 15.5s
+    last_text = ""
+    for delay in delays:
+        r = httpx.post(url, json=payload, timeout=15.0)
+        if r.status_code == 404:
+            last_text = r.text
+            print(f"[discord post_followup] 404, retrying in {delay}s ({r.text[:200]})")
+            time.sleep(delay)
+            continue
+        if not r.is_success:
+            print(f"[discord post_followup] {r.status_code}: {r.text[:500]}")
+        r.raise_for_status()
+        return
+    raise httpx.HTTPStatusError(
+        f"Discord 404 after {len(delays)} retries on POST followup. "
+        f"Last response body: {last_text[:500]}",
+        request=r.request,
+        response=r,
+    )
