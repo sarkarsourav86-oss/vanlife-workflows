@@ -62,6 +62,25 @@ COMMANDS = [
             },
         ],
     },
+    {
+        "name": "mn-parks",
+        "description": "One-shot availability check across MN state parks for given dates.",
+        "type": 1,
+        "options": [
+            {
+                "name": "start",
+                "description": "Start date (YYYY-MM-DD).",
+                "type": 3,
+                "required": True,
+            },
+            {
+                "name": "nights",
+                "description": "Number of nights (default 1).",
+                "type": 4,  # INTEGER
+                "required": False,
+            },
+        ],
+    },
 ]
 
 

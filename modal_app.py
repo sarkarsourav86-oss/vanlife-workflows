@@ -134,6 +134,34 @@ def status_report(interaction_token: str | None = None) -> dict:
     return {"report": report}
 
 
+@app.function(image=endpoint_image, secrets=secrets, timeout=120, retries=0)
+def mn_parks_check(
+    start: str,
+    nights: int = 1,
+    interaction_token: str | None = None,
+) -> dict:
+    """One-shot MN state-park availability check. No alert created."""
+    from src.workflows.mn_parks import build_embeds, find_availability, parse_date
+
+    import os
+    parsed = parse_date(start)
+    if not parsed:
+        msg = f"Couldn't parse date: `{start}`. Try `YYYY-MM-DD`."
+        if interaction_token:
+            from src.discord_interactions import send_followup
+            send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
+        return {"error": msg}
+
+    results = find_availability(parsed, nights=nights)
+    embeds = build_embeds(results, parsed, nights)
+
+    if interaction_token:
+        from src.discord_interactions import post_followup
+        post_followup(interaction_token, {"embeds": embeds})
+
+    return {"start": str(parsed), "nights": nights, "n_parks": len(results)}
+
+
 @app.function(
     image=worker_image,
     secrets=secrets,
@@ -296,6 +324,16 @@ async def discord_interactions(
             radius = float(options.get("radius") or 30.0)
             await dispersed_search.spawn.aio(
                 location=location, radius_miles=radius, interaction_token=token,
+            )
+            return {"type": 5}
+        if name == "mn-parks":
+            options = {opt["name"]: opt.get("value") for opt in (data.get("options") or [])}
+            start = options.get("start")
+            if not start:
+                return {"type": 4, "data": {"content": "Missing `start` parameter (YYYY-MM-DD)."}}
+            nights = int(options.get("nights") or 1)
+            await mn_parks_check.spawn.aio(
+                start=start, nights=nights, interaction_token=token,
             )
             return {"type": 5}
 
