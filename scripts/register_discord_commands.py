@@ -81,6 +81,25 @@ COMMANDS = [
             },
         ],
     },
+    {
+        "name": "weather",
+        "description": "Check wind and weather along a driving route. Alerts if dangerous for a high-roof van.",
+        "type": 1,
+        "options": [
+            {
+                "name": "origin",
+                "description": "Starting location (city/state or lat,lon).",
+                "type": 3,  # STRING
+                "required": True,
+            },
+            {
+                "name": "destination",
+                "description": "Ending location (city/state or lat,lon).",
+                "type": 3,
+                "required": True,
+            },
+        ],
+    },
 ]
 
 

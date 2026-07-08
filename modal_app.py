@@ -60,9 +60,10 @@ worker_image = (
 app = modal.App("vanlife-workflows")
 
 secrets = [
-    modal.Secret.from_name("campflare"),   # CAMPFLARE_API_KEY, CAMPFLARE_JWT_SECRET, optional CAMPFLARE_WEBHOOK_URL
-    modal.Secret.from_name("anthropic"),   # ANTHROPIC_API_KEY
-    modal.Secret.from_name("discord"),     # DISCORD_WEBHOOK_URL, DISCORD_PUBLIC_KEY, DISCORD_APP_ID
+    modal.Secret.from_name("campflare"),          # CAMPFLARE_API_KEY, CAMPFLARE_JWT_SECRET, optional CAMPFLARE_WEBHOOK_URL
+    modal.Secret.from_name("anthropic"),           # ANTHROPIC_API_KEY
+    modal.Secret.from_name("discord"),             # DISCORD_WEBHOOK_URL, DISCORD_PUBLIC_KEY, DISCORD_APP_ID
+    modal.Secret.from_name("openrouteservice"),    # ORS_API_KEY for road-accurate route weather
 ]
 
 # Unified state Dict: {region_name: alert_id}. Replaces the previous
@@ -212,6 +213,61 @@ def dispersed_search(
     return {"location": location, "lat": lat, "lng": lng, "n_spots": len(spots)}
 
 
+@app.function(image=endpoint_image, secrets=secrets, timeout=180, retries=0)
+def weather_check(
+    origin: str,
+    destination: str,
+    interaction_token: str | None = None,
+) -> dict:
+    """Check weather along a road route (origin → destination) and post a Discord embed.
+
+    Geocodes both endpoints via Open-Meteo, fetches the actual road polyline via
+    OpenRouteService, samples weather every ~50 miles, then posts a danger/clear embed.
+    If dangerous conditions are found, also spawns weather_watch at the worst segment.
+    """
+    import os
+    from src.workflows.weather_check import check_route, build_weather_embed
+    from src.discord_interactions import post_followup
+
+    result = check_route(origin, destination)
+    embeds = build_weather_embed(result)
+
+    if interaction_token:
+        post_followup(interaction_token, {"embeds": embeds})
+
+    if result.worst_segment:
+        ws = result.worst_segment
+        weather_watch.spawn(lat=ws.lat, lon=ws.lon, label=ws.label)
+
+    return {
+        "origin": origin,
+        "destination": destination,
+        "waypoints_checked": result.waypoints_checked,
+        "all_clear": result.all_clear,
+        "n_dangerous": len(result.dangerous_segments),
+    }
+
+
+@app.function(image=endpoint_image, secrets=secrets, timeout=86400, retries=0)
+def weather_watch(lat: float, lon: float, label: str) -> dict:
+    """Poll weather at a parked location until conditions clear, then post to Discord.
+
+    Spawned automatically by weather_check when dangerous conditions are found.
+    Polls every 30 min; posts a clearing embed when the next 2 hours look safe.
+    Max runtime: 24 h (timeout=86400). Posts status updates every ~2 h while waiting.
+    """
+    import os
+    from src.workflows.weather_check import start_weather_watch
+    from src.discord import post_to_discord
+
+    def _post(embed: dict) -> None:
+        webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+        post_to_discord(embeds=[embed], webhook_url=webhook_url)
+
+    start_weather_watch(lat, lon, label, _post)
+    return {"lat": lat, "lon": lon, "label": label}
+
+
 # ---------- Public HTTP endpoints ----------
 
 @app.function(image=worker_image, secrets=secrets)
@@ -334,6 +390,17 @@ async def discord_interactions(
             nights = int(options.get("nights") or 1)
             await mn_parks_check.spawn.aio(
                 start=start, nights=nights, interaction_token=token,
+            )
+            return {"type": 5}
+
+        if name == "weather":
+            options = {opt["name"]: opt.get("value") for opt in (data.get("options") or [])}
+            origin = options.get("origin")
+            destination = options.get("destination")
+            if not origin or not destination:
+                return {"type": 4, "data": {"content": "Missing `origin` or `destination`."}}
+            await weather_check.spawn.aio(
+                origin=origin, destination=destination, interaction_token=token,
             )
             return {"type": 5}
 
