@@ -27,10 +27,25 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from ..discord import availability_embed, pick_webhook_url, post_to_discord
+from ..campflare import CampflareClient, Campsite
+from ..discord import availability_embed, pick_webhook_url, post_to_discord, send_dm
 from ..site_photo import get_site_info
 from ..starlink_score import get_starlink_score
 from .region_finder import REGIONS
+
+# Per-process cache: campground_id -> {site_name: Campsite}
+_campsite_cache: dict[str, dict[str, Campsite]] = {}
+
+
+def _get_campsite(campground_id: str, campsite_name: str) -> Campsite | None:
+    if campground_id not in _campsite_cache:
+        try:
+            with CampflareClient() as client:
+                sites = client.get_campsites(campground_id)
+            _campsite_cache[campground_id] = {s.name: s for s in sites}
+        except Exception:
+            return None
+    return _campsite_cache.get(campground_id, {}).get(campsite_name)
 
 _SCORE_EMOJI = {"good": "🛰️ Good", "marginal": "🛰️ Marginal", "poor": "🛰️ Poor"}
 
@@ -68,6 +83,41 @@ def _has_weekday_night(start: date, nights: int) -> bool:
     return False
 
 
+def _has_weekend_night(start: date, nights: int) -> bool:
+    """True if any night in [start, start+nights) falls on Fri or Sat (weekday 4-5)."""
+    for i in range(max(nights, 1)):
+        if (start + timedelta(days=i)).weekday() in (4, 5):
+            return True
+    return False
+
+
+def _check_notif_cache(alert_id: str, site_id: str, date_str: str) -> bool:
+    """Return True if this (alert, site, date) was already DM'd today — skip it."""
+    try:
+        import modal
+        from datetime import date as _date
+        cache = modal.Dict.from_name("notification-cache", create_if_missing=True)
+        key = f"{alert_id}|{site_id}|{date_str}"
+        today = _date.today().isoformat()
+        if cache.get(key) == today:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _write_notif_cache(alert_id: str, site_id: str, date_str: str) -> None:
+    """Mark this (alert, site, date) as notified today."""
+    try:
+        import modal
+        from datetime import date as _date
+        cache = modal.Dict.from_name("notification-cache", create_if_missing=True)
+        key = f"{alert_id}|{site_id}|{date_str}"
+        cache[key] = _date.today().isoformat()
+    except Exception:
+        pass
+
+
 def handle_alert(payload: dict) -> dict:
     """Entry point for webhook POSTs. Returns a small summary for logging."""
     metadata = payload.get("metadata") or {}
@@ -84,6 +134,16 @@ def handle_alert(payload: dict) -> dict:
 
     if metadata.get("weekdays_only") and not _has_weekday_night(start, nights):
         return {"status": "skipped", "reason": "no weekday nights in window"}
+
+    if metadata.get("weekends_only") and not _has_weekend_night(start, nights):
+        return {"status": "skipped", "reason": "no weekend nights in window"}
+
+    watch_campsite = metadata.get("campsite")
+    incoming_campsite = payload.get("campsite_name")
+    if watch_campsite and incoming_campsite:
+        allowed = {s.strip().lower() for s in watch_campsite.split(",")}
+        if incoming_campsite.strip().lower() not in allowed:
+            return {"status": "skipped", "reason": f"campsite {incoming_campsite!r} not in watch targets"}
 
     cg_name = payload.get("campground_name") or "Unknown campground"
     cg_id = payload.get("campground_id")
@@ -122,6 +182,27 @@ def handle_alert(payload: dict) -> dict:
         embed["fields"].append({"name": "Site", "value": campsite, "inline": True})
     if region_label:
         embed["fields"].append({"name": "Region", "value": region_label, "inline": True})
+
+    # Enrich with per-site attributes from Campflare campsites endpoint.
+    if cg_id and campsite:
+        site = _get_campsite(cg_id, campsite)
+        if site is not None:
+            if site.kind_listed:
+                embed["fields"].append({"name": "Type", "value": site.kind_listed, "inline": True})
+            if site.driveway_length:
+                embed["fields"].append({"name": "Driveway", "value": f"{int(site.driveway_length)} ft", "inline": True})
+            if site.max_rv_length:
+                embed["fields"].append({"name": "Max RV", "value": f"{int(site.max_rv_length)} ft", "inline": True})
+            if site.ada_accessible:
+                embed["fields"].append({"name": "ADA", "value": "Yes", "inline": True})
+            if site.price and site.price.get("per_night"):
+                embed["fields"].append({"name": "Price", "value": f"${site.price['per_night']:.0f}/night", "inline": True})
+            # Site photo — Campflare original_url works for rec.gov campgrounds;
+            # state parks have empty photos so this falls through to site_photo below.
+            if not embed.get("image"):
+                photo = site.photo_url()
+                if photo:
+                    embed["image"] = {"url": photo}
 
     # Optional recreation.gov site info: hero photo + shade attribute. Augments
     # the embed without replacing Starlink scoring (different signals — photo
@@ -167,6 +248,20 @@ def handle_alert(payload: dict) -> dict:
         footer_parts.append(f"alert: {aid[:8]}")
     if footer_parts:
         embed["footer"] = {"text": " • ".join(footer_parts)}
+
+    workflow = metadata.get("workflow")
+    if workflow == "user_watch":
+        user_id = metadata.get("discord_user_id")
+        if user_id:
+            # Dedup: skip if this (alert, site, date) already sent a DM today.
+            date_str = start.isoformat()
+            site_id = payload.get("campsite_name") or ""
+            if aid and _check_notif_cache(aid, site_id, date_str):
+                return {"status": "skipped", "reason": "already notified today (cache hit)"}
+            send_dm(user_id, embeds=[embed])
+            if aid:
+                _write_notif_cache(aid, site_id, date_str)
+            return {"status": "dm_sent", "campground": cg_name, "start": date_str, "nights": nights}
 
     post_to_discord(embeds=[embed], webhook_url=pick_webhook_url(metadata))
     return {"status": "posted", "campground": cg_name, "start": start.isoformat(), "nights": nights}

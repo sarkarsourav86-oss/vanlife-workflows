@@ -82,8 +82,37 @@ class Campground(BaseModel):
     name: str
     latitude: float | None = None
     longitude: float | None = None
+    reservation_url: str | None = None
 
     model_config = {"extra": "allow"}  # tolerate fields we haven't modeled yet
+
+
+class Campsite(BaseModel):
+    id: str
+    name: str
+    kind: str | None = None
+    kind_listed: str | None = None
+    loop_name: str | None = None
+    electric_hookups: bool | None = None
+    water_hookups: bool | None = None
+    sewer_hookups: bool | None = None
+    ada_accessible: bool | None = None
+    driveway_length: float | None = None
+    max_rv_length: float | None = None
+    pull_through: bool | None = None
+    max_people: int | None = None
+    price: dict | None = None
+    photos: list[dict] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
+
+    def photo_url(self) -> str | None:
+        """Return best available photo URL: Campflare CDN first, then original_url."""
+        for p in self.photos:
+            url = p.get("large_url") or p.get("medium_url") or p.get("small_url") or p.get("original_url")
+            if url:
+                return url
+        return None
 
 
 class CreateAlertRequest(BaseModel):
@@ -108,7 +137,7 @@ class CampflareClient:
     def __enter__(self):
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *_):
         self.close()
 
     def _post(self, path: str, json: dict) -> dict:
@@ -133,6 +162,24 @@ class CampflareClient:
         """GET /campground/{id} — fetch a single campground's full record."""
         data = self._get(f"/campground/{campground_id}")
         return Campground.model_validate(data)
+
+    def get_campsites(self, campground_id: str) -> list[Campsite]:
+        """GET /campground/{id}/campsites — all campsites with per-site attributes."""
+        with log_api_call("campflare", f"GET /campground/{campground_id}/campsites"):
+            r = self._client.get(f"/campground/{campground_id}/campsites")
+            r.raise_for_status()
+            return [Campsite.model_validate(c) for c in r.json()]
+
+    def search_lands(self, query: str, limit: int = 5) -> list[dict]:
+        """GET /lands/search — find parks/regions by name. Returns raw dicts with id, name, kind."""
+        data = self._get("/lands/search", params={"query": query, "limit": limit})
+        return data.get("lands") or []
+
+    def search_campgrounds_by_land(self, land_id: str, limit: int = 20) -> list[Campground]:
+        """POST /campgrounds/search filtered to a specific land (park/region)."""
+        data = self._post("/campgrounds/search", {"land_id": land_id, "limit": limit})
+        results = data.get("results") or data.get("campgrounds") or []
+        return [Campground.model_validate(c) for c in results]
 
     def search_campgrounds(self, req: CampgroundSearchRequest) -> list[Campground]:
         """POST /campgrounds/search — at least one filter must be set."""

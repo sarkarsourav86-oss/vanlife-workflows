@@ -70,6 +70,16 @@ secrets = [
 # per-workflow dicts (mn-weekday-alerts, np-camping-alerts).
 region_alerts_state = modal.Dict.from_name("region-alerts", create_if_missing=True)
 
+# Per-user alert state: {discord_user_id: [{alert_id, park, campground_ids, start, end}, ...]}
+user_alerts_state = modal.Dict.from_name("user-alerts", create_if_missing=True)
+
+# Poller state: kept for backwards compat but no longer used for availability snapshots.
+poll_state = modal.Dict.from_name("poll-state", create_if_missing=True)
+
+# Notification dedup cache: {alert_id|site_id|date: YYYY-MM-DD} — prevents duplicate DMs
+# from both the poller and Campflare webhook firing for the same opening on the same day.
+notif_cache = modal.Dict.from_name("notification-cache", create_if_missing=True)
+
 # Volume holding the iOverlander+PAD-US enriched SQLite DB. Built locally by
 # `scripts/build_dispersed_db.py` and uploaded with
 # `modal volume put dispersed-data dispersed.db /dispersed.db --force`.
@@ -268,6 +278,203 @@ def weather_watch(lat: float, lon: float, label: str) -> dict:
     return {"lat": lat, "lon": lon, "label": label}
 
 
+_MAX_USER_ALERTS = 6
+
+
+@app.function(image=endpoint_image, secrets=secrets, timeout=120, retries=0)
+def user_watch_create(
+    user_id: str,
+    campground_id: str,
+    start: str,
+    end: str,
+    nights: int = 1,
+    campsite_kind: str | None = None,
+    weekdays_only: bool = False,
+    weekends_only: bool = False,
+    campsite: str | None = None,
+    interaction_token: str | None = None,
+) -> dict:
+    """Create a personal Campflare alert for a Discord user and DM them when it fires.
+
+    Receives a specific campground_id chosen via autocomplete, creates an alert,
+    stores it in the user-alerts Modal Dict, and posts a confirmation followup.
+    """
+    import os
+    from datetime import date as _date
+    from src.campflare import CampflareClient, CreateAlertRequest, AvailabilityFilter
+    from src.discord_interactions import send_followup
+    from src.workflows.region_finder import daily_ranges
+
+    existing = list(user_alerts_state.get(user_id) or [])
+    if len(existing) >= _MAX_USER_ALERTS:
+        lines = "\n".join(
+            f"• `{a['alert_id'][:8]}` — {a.get('campground_name') or a.get('park', '?')} ({a['start']} to {a['end']})"
+            for a in existing
+        )
+        msg = f"You already have {_MAX_USER_ALERTS} active watches (the max).\n{lines}\nUse `/unwatch` to remove one first."
+        if interaction_token:
+            send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
+        return {"error": "limit_reached"}
+
+    try:
+        start_date = _date.fromisoformat(start)
+        end_date = _date.fromisoformat(end)
+    except ValueError:
+        msg = f"Invalid date format. Use YYYY-MM-DD (got start=`{start}`, end=`{end}`)."
+        if interaction_token:
+            send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
+        return {"error": "bad_date"}
+
+    kinds = [campsite_kind] if campsite_kind else None
+
+    with CampflareClient() as client:
+        cg = client.get_campground(campground_id)
+        campground_name = cg.name
+
+        metadata: dict = {
+            "workflow": "user_watch",
+            "discord_user_id": user_id,
+            "park": campground_name,
+            "weekdays_only": weekdays_only,
+            "weekends_only": weekends_only,
+        }
+        if campsite:
+            metadata["campsite"] = campsite
+
+        alert = client.create_alert(CreateAlertRequest(
+            campground_ids=[campground_id],
+            parameters=AvailabilityFilter(
+                date_ranges=daily_ranges(start_date, end_date, nights, tuple(range(1, 13))),
+                status=["available"],
+                campsite_kinds=kinds,
+            ),
+            metadata=metadata,
+            webhook_override_url=os.environ.get("CAMPFLARE_WEBHOOK_URL") or None,
+        ))
+    alert_id = alert.get("id") or alert.get("alert_id") or str(alert)
+
+    entry = {
+        "alert_id": alert_id,
+        "campground_id": campground_id,
+        "campground_name": campground_name,
+        "start": start,
+        "end": end,
+        "nights": nights,
+        "campsite_kind": campsite_kind,
+        "weekdays_only": weekdays_only,
+        "weekends_only": weekends_only,
+        "campsite": campsite,
+    }
+    user_alerts_state[user_id] = existing + [entry]
+
+    # Immediately poll so the user gets a DM right away if anything is already open.
+    poll_availability.spawn()
+
+    flags = []
+    if weekdays_only:
+        flags.append("weekdays only")
+    if weekends_only:
+        flags.append("weekends only")
+    if campsite:
+        flags.append(f"site {campsite}")
+    flag_str = (", " + ", ".join(flags)) if flags else ""
+    msg = (
+        f"Watching **{campground_name}** ({start} to {end}, {nights} night{'s' if nights != 1 else ''}{flag_str})."
+        "\n\nI'll DM you when something opens. Use `/unwatch` to cancel."
+    )
+    if interaction_token:
+        send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
+
+    return {"alert_id": alert_id, "campground_name": campground_name}
+
+
+@app.function(image=endpoint_image, secrets=secrets, timeout=60, retries=0)
+def user_watch_cancel(
+    user_id: str,
+    alert_id: str,
+    interaction_token: str | None = None,
+) -> dict:
+    """Cancel a personal alert and remove it from user state."""
+    import os
+    from src.campflare import CampflareClient
+    from src.discord_interactions import send_followup
+
+    existing = list(user_alerts_state.get(user_id) or [])
+    entry = next((a for a in existing if a["alert_id"] == alert_id), None)
+    if not entry:
+        msg = f"Alert `{alert_id[:8]}` not found in your watches."
+        if interaction_token:
+            send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
+        return {"error": "not_found"}
+
+    try:
+        with CampflareClient() as client:
+            client.cancel_alert(alert_id)
+    except Exception as e:
+        # Alert may have already expired — still remove from our state
+        print(f"[user_watch_cancel] cancel_alert error (ignored): {e}")
+
+    user_alerts_state[user_id] = [a for a in existing if a["alert_id"] != alert_id]
+    display_name = entry.get("campground_name") or entry.get("park", alert_id[:8])
+    msg = f"Alert for **{display_name}** (`{alert_id[:8]}`) cancelled."
+    if interaction_token:
+        send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
+    return {"cancelled": alert_id, "campground_name": display_name}
+
+
+@app.function(image=endpoint_image, secrets=secrets, timeout=60, retries=0)
+def user_watch_list(
+    user_id: str,
+    interaction_token: str | None = None,
+) -> dict:
+    """List a user's active watches and post them as a followup."""
+    import os
+    from src.discord_interactions import send_followup
+
+    existing = list(user_alerts_state.get(user_id) or [])
+    if not existing:
+        msg = "You have no active watches. Use `/watch` to set one up."
+    else:
+        def _alert_line(a: dict) -> str:
+            flags = []
+            if a.get("weekdays_only"):
+                flags.append("weekdays only")
+            if a.get("weekends_only"):
+                flags.append("weekends only")
+            if a.get("campsite"):
+                flags.append(f"site {a['campsite']}")
+            flag_str = (" · " + ", ".join(flags)) if flags else ""
+            name = a.get("campground_name") or a.get("park", "?")
+            return (
+                f"• `{a['alert_id'][:8]}` — **{name}** "
+                f"({a['start']} to {a['end']}, {a['nights']} night{'s' if a['nights'] != 1 else ''})"
+                + flag_str
+            )
+        lines = "\n".join(_alert_line(a) for a in existing)
+        msg = f"**Your active watches ({len(existing)}/{_MAX_USER_ALERTS}):**\n{lines}"
+
+    if interaction_token:
+        send_followup(os.environ["DISCORD_APP_ID"], interaction_token, msg)
+    return {"n_alerts": len(existing)}
+
+
+@app.function(image=endpoint_image, secrets=secrets, timeout=120, retries=0, schedule=modal.Cron("*/2 * * * *"))
+def poll_availability() -> dict:
+    """Poll bulk_availability for all user_watch campgrounds every 2 minutes.
+
+    Compares current availability against the last known state (poll-state Dict)
+    and fires handle_alert() for any new openings, which DMs the user directly.
+    """
+    from src.workflows.poller import run_poll
+    result = run_poll(user_alerts_state, notif_cache)
+    print(
+        f"[poll] active={result['active_alerts']} polled={result['campgrounds_polled']} "
+        f"new_openings={result['new_openings']} dm_sent={result['dm_sent']} "
+        f"filtered={result['filtered']} watching={result['watching']}"
+    )
+    return result
+
+
 # ---------- Public HTTP endpoints ----------
 
 @app.function(image=worker_image, secrets=secrets)
@@ -303,7 +510,7 @@ def campflare_webhook(payload: dict, authorization: str = Header(None)) -> dict:
     return handle_alert(payload)
 
 
-@app.function(image=endpoint_image, secrets=secrets)
+@app.function(image=endpoint_image, secrets=secrets, min_containers=1)
 @modal.fastapi_endpoint(method="POST")
 async def discord_interactions(
     request: Request,
@@ -357,6 +564,43 @@ async def discord_interactions(
                 if focused_value in r.name.lower() or focused_value in r.display_name.lower()
             ][:25]
             return {"type": 8, "data": {"choices": choices}}
+        if name == "watch":
+            focused_value = ""
+            for opt in (data.get("options") or []):
+                if opt.get("focused") and opt.get("name") == "campground":
+                    focused_value = (opt.get("value") or "").strip()
+                    break
+            if len(focused_value) < 2:
+                return {"type": 8, "data": {"choices": []}}
+            try:
+                from src.campflare import CampflareClient, CampgroundSearchRequest
+                with CampflareClient() as client:
+                    results = client.search_campgrounds(CampgroundSearchRequest(query=focused_value, limit=25))
+                choices = [{"name": cg.name, "value": cg.id} for cg in results]
+            except Exception:
+                choices = []
+            return {"type": 8, "data": {"choices": choices[:25]}}
+        if name == "unwatch":
+            user_id = (
+                (interaction.get("member") or {}).get("user", {}).get("id")
+                or (interaction.get("user") or {}).get("id")
+            )
+            existing = list(await user_alerts_state.get.aio(user_id) or []) if user_id else []
+            focused_value = ""
+            for opt in (data.get("options") or []):
+                if opt.get("focused") and opt.get("name") == "alert_id":
+                    focused_value = (opt.get("value") or "").lower()
+                    break
+            choices = [
+                {
+                    "name": f"{a.get('campground_name') or a.get('park', '?')} ({a['start']} to {a['end']})",
+                    "value": a["alert_id"],
+                }
+                for a in existing
+                if focused_value in (a.get("campground_name") or a.get("park", "")).lower()
+                or focused_value in a["alert_id"].lower()
+            ][:25]
+            return {"type": 8, "data": {"choices": choices}}
         return {"type": 8, "data": {"choices": []}}
 
     # Type 2 = APPLICATION_COMMAND.
@@ -402,6 +646,59 @@ async def discord_interactions(
             await weather_check.spawn.aio(
                 origin=origin, destination=destination, interaction_token=token,
             )
+            return {"type": 5}
+
+        if name == "watch":
+            user_id = (
+                (interaction.get("member") or {}).get("user", {}).get("id")
+                or (interaction.get("user") or {}).get("id")
+            )
+            if not user_id:
+                return {"type": 4, "data": {"content": "Could not determine your Discord user ID."}}
+            options = {opt["name"]: opt.get("value") for opt in (data.get("options") or [])}
+            campground_id = options.get("campground")
+            start = options.get("start")
+            end = options.get("end")
+            if not campground_id or not start or not end:
+                return {"type": 4, "data": {"content": "Missing required options: `campground`, `start`, `end`."}}
+            await user_watch_create.spawn.aio(
+                user_id=user_id,
+                campground_id=campground_id,
+                start=start,
+                end=end,
+                nights=int(options.get("nights") or 1),
+                campsite_kind=options.get("campsite_kind") or None,
+                weekdays_only=bool(options.get("weekdays_only")),
+                weekends_only=bool(options.get("weekends_only")),
+                campsite=options.get("campsite") or None,
+                interaction_token=token,
+            )
+            return {"type": 5}
+
+        if name == "unwatch":
+            user_id = (
+                (interaction.get("member") or {}).get("user", {}).get("id")
+                or (interaction.get("user") or {}).get("id")
+            )
+            if not user_id:
+                return {"type": 4, "data": {"content": "Could not determine your Discord user ID."}}
+            options = {opt["name"]: opt.get("value") for opt in (data.get("options") or [])}
+            alert_id = options.get("alert_id")
+            if not alert_id:
+                return {"type": 4, "data": {"content": "Missing `alert_id`."}}
+            await user_watch_cancel.spawn.aio(
+                user_id=user_id, alert_id=alert_id, interaction_token=token,
+            )
+            return {"type": 5}
+
+        if name == "my-watches":
+            user_id = (
+                (interaction.get("member") or {}).get("user", {}).get("id")
+                or (interaction.get("user") or {}).get("id")
+            )
+            if not user_id:
+                return {"type": 4, "data": {"content": "Could not determine your Discord user ID."}}
+            await user_watch_list.spawn.aio(user_id=user_id, interaction_token=token)
             return {"type": 5}
 
         return {"type": 4, "data": {"content": f"Unknown command: `{name}`"}}
