@@ -157,6 +157,35 @@ def geocode(location: str) -> tuple[float, float] | None:
     return None
 
 
+def geocode_bbox(location: str, radius_miles: float = 100.0) -> tuple[float, float, float, float] | None:
+    """Geocode a location string and return a (min_lat, max_lat, min_lon, max_lon) bounding box.
+
+    Uses Nominatim (OSM) which correctly handles US state names, national parks,
+    and cities — unlike Open-Meteo geocoding which only knows populated places.
+    Returns None if geocoding fails.
+    """
+    try:
+        resp = httpx.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": location, "format": "json", "limit": 1, "addressdetails": 0},
+            headers={"User-Agent": "vanlife-workflows/1.0 sourav.sarkar@ilmservice.com"},
+            timeout=10,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        results = resp.json()
+        if not results:
+            return None
+        lat = float(results[0]["lat"])
+        lon = float(results[0]["lon"])
+    except Exception:
+        return None
+    # 1 degree lat ~ 69 miles; 1 degree lon ~ 69 * cos(lat) miles
+    lat_delta = radius_miles / 69.0
+    lon_delta = radius_miles / (69.0 * math.cos(math.radians(lat)))
+    return (lat - lat_delta, lat + lat_delta, lon - lon_delta, lon + lon_delta)
+
+
 def reverse_geocode(lat: float, lon: float) -> str:
     """Return a human-readable location label for (lat, lon) via Nominatim (OSM).
 

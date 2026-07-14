@@ -100,6 +100,88 @@ COMMANDS = [
             },
         ],
     },
+    {
+        "name": "watch",
+        "description": "Set up a personal campsite availability alert. You'll be DM'd when something opens.",
+        "type": 1,
+        "options": [
+            {
+                "name": "campground",
+                "description": "Campground to watch — type to search.",
+                "type": 3,
+                "required": True,
+                "autocomplete": True,
+            },
+            {
+                "name": "start",
+                "description": "Watch window start date (YYYY-MM-DD).",
+                "type": 3,
+                "required": True,
+            },
+            {
+                "name": "end",
+                "description": "Watch window end date (YYYY-MM-DD).",
+                "type": 3,
+                "required": True,
+            },
+            {
+                "name": "nights",
+                "description": "Minimum consecutive nights required (default 1).",
+                "type": 4,  # INTEGER
+                "required": False,
+            },
+            {
+                "name": "campsite_kind",
+                "description": "Filter by campsite type.",
+                "type": 3,
+                "required": False,
+                "choices": [
+                    {"name": "Standard", "value": "standard"},
+                    {"name": "RV", "value": "rv"},
+                    {"name": "Tent-only", "value": "tent-only"},
+                    {"name": "Walk-to", "value": "walk-to"},
+                    {"name": "Equestrian", "value": "equestrian"},
+                ],
+            },
+            {
+                "name": "weekdays_only",
+                "description": "Only alert for Mon-Thu nights (default False).",
+                "type": 5,  # BOOLEAN
+                "required": False,
+            },
+            {
+                "name": "weekends_only",
+                "description": "Only alert for Fri-Sat nights (default False).",
+                "type": 5,  # BOOLEAN
+                "required": False,
+            },
+            {
+                "name": "campsite",
+                "description": "Campsite name(s) to watch, comma-separated (e.g. 'Y1,Y2,Y3'). Leave blank for any site.",
+                "type": 3,
+                "required": False,
+            },
+        ],
+    },
+    {
+        "name": "unwatch",
+        "description": "Cancel one of your active campsite watches.",
+        "type": 1,
+        "options": [
+            {
+                "name": "alert_id",
+                "description": "Which alert to cancel (pick from the list).",
+                "type": 3,
+                "required": True,
+                "autocomplete": True,
+            },
+        ],
+    },
+    {
+        "name": "my-watches",
+        "description": "List all your active campsite availability watches.",
+        "type": 1,
+    },
 ]
 
 
