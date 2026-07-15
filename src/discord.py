@@ -54,42 +54,60 @@ def post_to_discord(
     r.raise_for_status()
 
 
+def _open_dm_channel(bot_token: str, user_id: str) -> str:
+    """Return the DM channel ID for a user, opening it if needed."""
+    r = httpx.post(
+        "https://discord.com/api/v10/users/@me/channels",
+        headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
+        json={"recipient_id": user_id},
+        timeout=10.0,
+    )
+    r.raise_for_status()
+    return r.json()["id"]
+
+
 def send_dm(
     user_id: str,
     content: str | None = None,
     *,
     embeds: list[dict] | None = None,
+    attachment: bytes | None = None,
+    attachment_filename: str = "image.jpg",
 ) -> None:
     """Send a Discord DM to a user by their Discord user ID.
 
     Opens (or reuses) a DM channel via the bot API, then posts the message.
     Requires DISCORD_BOT_TOKEN in the environment.
+
+    If `attachment` bytes are provided, the file is uploaded alongside the
+    message. The embed should reference it as ``attachment://<filename>``.
     """
+    import json as _json
+
     bot_token = os.environ["DISCORD_BOT_TOKEN"]
-    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
+    channel_id = _open_dm_channel(bot_token, user_id)
 
-    # Step 1: open (or fetch existing) DM channel
-    dm_resp = httpx.post(
-        "https://discord.com/api/v10/users/@me/channels",
-        headers=headers,
-        json={"recipient_id": user_id},
-        timeout=10.0,
-    )
-    dm_resp.raise_for_status()
-    channel_id = dm_resp.json()["id"]
-
-    # Step 2: post message to that channel
     payload: dict = {}
     if content:
         payload["content"] = content
     if embeds:
         payload["embeds"] = embeds
-    msg_resp = httpx.post(
-        f"https://discord.com/api/v10/channels/{channel_id}/messages",
-        headers=headers,
-        json=payload,
-        timeout=15.0,
-    )
+
+    if attachment is not None:
+        msg_resp = httpx.post(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            headers={"Authorization": f"Bot {bot_token}"},
+            files={"file": (attachment_filename, attachment, "image/jpeg")},
+            data={"payload_json": _json.dumps(payload)},
+            timeout=20.0,
+        )
+    else:
+        msg_resp = httpx.post(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=15.0,
+        )
     msg_resp.raise_for_status()
 
 

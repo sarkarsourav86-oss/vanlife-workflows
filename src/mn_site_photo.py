@@ -184,6 +184,28 @@ def get_mn_site_photo(campground_id: str, campsite_name: str | None) -> str | No
     return f"{IMG_BASE}/{rec['unit_id']}.jpg"
 
 
+def fetch_mn_site_photo_bytes(photo_url: str) -> bytes | None:
+    """Fetch an MN state park photo and re-encode as plain JPEG bytes.
+
+    ReserveMN photos are MPO files (multi-picture stereoscopic JPEG) that
+    Discord's image proxy refuses to render. Re-encoding with Pillow strips
+    the MPO wrapper and produces a standard JPEG Discord can display.
+    Returns None on any failure.
+    """
+    try:
+        import io
+        from PIL import Image
+        r = httpx.get(photo_url, timeout=15.0)
+        if r.status_code != 200:
+            return None
+        img = Image.open(io.BytesIO(r.content))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
 if __name__ == "__main__":
     import sys
 
