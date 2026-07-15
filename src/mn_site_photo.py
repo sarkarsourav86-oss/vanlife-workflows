@@ -60,8 +60,8 @@ def _units_cache():
         return None
 
 
-def _fetch_units(facility_id: int) -> dict[str, int]:
-    """Return {normalized_site_name: UnitId} for a facility. Empty dict on failure."""
+def _fetch_units(facility_id: int) -> dict[str, dict]:
+    """Return {normalized_site_name: {unit_id, lat, lon}} for a facility."""
     try:
         r = httpx.post(
             f"{RDR_BASE}/search/grid",
@@ -72,11 +72,21 @@ def _fetch_units(facility_id: int) -> dict[str, int]:
         if r.status_code != 200:
             return {}
         units = r.json().get("Facility", {}).get("Units", {})
-        return {
-            _normalize_name(u.get("Name")): u["UnitId"]
-            for u in units.values()
-            if u.get("UnitId") and u.get("Name")
-        }
+        result = {}
+        for u in units.values():
+            uid = u.get("UnitId")
+            name = u.get("Name")
+            if not uid or not name:
+                continue
+            map_info = u.get("MapInfo") or {}
+            lat = map_info.get("Latitude") or None
+            lon = map_info.get("Longitude") or None
+            if lat == 0.0:
+                lat = None
+            if lon == 0.0:
+                lon = None
+            result[_normalize_name(name)] = {"unit_id": uid, "lat": lat, "lon": lon}
+        return result
     except Exception:
         return {}
 
@@ -98,21 +108,30 @@ def _get_units(facility_id: int) -> dict[str, int]:
     return units
 
 
-def _match_unit_id(units: dict[str, int], campsite_name: str) -> int | None:
-    """Find UnitId by matching campsite_name against the units dict."""
+def _match_unit(units: dict[str, dict], campsite_name: str) -> dict | None:
+    """Find unit record by matching campsite_name against the units dict."""
     target = _normalize_name(campsite_name)
     if not target:
         return None
-
-    # Exact match first
     if target in units:
         return units[target]
-
-    # Substring match: handles "Drive-In #16" matching "16" and vice versa
-    for name, uid in units.items():
+    for name, rec in units.items():
         if target in name or name in target:
-            return uid
+            return rec
+    return None
 
+
+def get_mn_site_coords(campground_id: str, campsite_name: str | None) -> tuple[float, float] | None:
+    """Return (lat, lon) for an MN state park campsite, or None."""
+    if not campsite_name:
+        return None
+    facility_id = _parse_facility_id(campground_id or "")
+    if facility_id is None:
+        return None
+    units = _get_units(facility_id)
+    rec = _match_unit(units, campsite_name)
+    if rec and rec.get("lat") and rec.get("lon"):
+        return rec["lat"], rec["lon"]
     return None
 
 
@@ -130,14 +149,10 @@ def get_mn_site_photo(campground_id: str, campsite_name: str | None) -> str | No
         return None
 
     units = _get_units(facility_id)
-    if not units:
+    rec = _match_unit(units, campsite_name)
+    if not rec:
         return None
-
-    unit_id = _match_unit_id(units, campsite_name)
-    if unit_id is None:
-        return None
-
-    return f"{IMG_BASE}/{unit_id}.jpg"
+    return f"{IMG_BASE}/{rec['unit_id']}.jpg"
 
 
 if __name__ == "__main__":

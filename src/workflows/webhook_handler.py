@@ -29,7 +29,7 @@ from typing import Any
 
 from ..campflare import CampflareClient, Campsite
 from ..discord import availability_embed, pick_webhook_url, post_to_discord, send_dm
-from ..mn_site_photo import get_mn_site_photo
+from ..mn_site_photo import get_mn_site_coords, get_mn_site_photo
 from ..site_photo import get_site_info
 from ..starlink_score import get_starlink_score
 from .region_finder import REGIONS
@@ -221,13 +221,20 @@ def handle_alert(payload: dict) -> dict:
         if site_info.shade:
             embed["fields"].append({"name": "Shade", "value": site_info.shade, "inline": True})
 
-    # MN state park site photo — fallback when rec.gov photo is absent (state parks
-    # aren't on recreation.gov, so site_info is always None for them).
-    if cg_id and campsite and not embed.get("image"):
+    # MN state park site photo + per-site coordinates. Falls through silently for
+    # non-MN campgrounds. Coordinates improve the Starlink score from campground
+    # centroid to the actual site pad.
+    mn_lat: float | None = None
+    mn_lon: float | None = None
+    if cg_id and campsite:
         try:
-            mn_photo = get_mn_site_photo(cg_id, campsite)
-            if mn_photo:
-                embed["image"] = {"url": mn_photo}
+            if not embed.get("image"):
+                mn_photo = get_mn_site_photo(cg_id, campsite)
+                if mn_photo:
+                    embed["image"] = {"url": mn_photo}
+            coords = get_mn_site_coords(cg_id, campsite)
+            if coords:
+                mn_lat, mn_lon = coords
         except Exception:
             pass
 
@@ -238,6 +245,8 @@ def handle_alert(payload: dict) -> dict:
             score = get_starlink_score(
                 campground_id=cg_id,
                 campground_name=cg_name,
+                lat=mn_lat,
+                lng=mn_lon,
             )
         except Exception:
             score = None
