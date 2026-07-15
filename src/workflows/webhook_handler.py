@@ -29,6 +29,7 @@ from typing import Any
 
 from ..campflare import CampflareClient, Campsite
 from ..discord import availability_embed, pick_webhook_url, post_to_discord, send_dm
+from ..mn_site_photo import get_mn_site_photo
 from ..site_photo import get_site_info
 from ..starlink_score import get_starlink_score
 from .region_finder import REGIONS
@@ -219,6 +220,16 @@ def handle_alert(payload: dict) -> dict:
             embed["image"] = {"url": site_info.photo_url}
         if site_info.shade:
             embed["fields"].append({"name": "Shade", "value": site_info.shade, "inline": True})
+
+    # MN state park site photo — fallback when rec.gov photo is absent (state parks
+    # aren't on recreation.gov, so site_info is always None for them).
+    if cg_id and campsite and not embed.get("image"):
+        try:
+            mn_photo = get_mn_site_photo(cg_id, campsite)
+            if mn_photo:
+                embed["image"] = {"url": mn_photo}
+        except Exception:
+            pass
 
     # Optional Starlink suitability score. Failures here must not block the alert.
     # Coordinates are looked up from Campflare on first use and cached.

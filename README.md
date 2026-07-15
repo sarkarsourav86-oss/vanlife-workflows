@@ -83,6 +83,58 @@ Copy the printed webhook URL into your Campflare dashboard (or set `CAMPFLARE_WE
 Personal use, free tiers on Modal/Supabase/Upstash, Haiku for formatting:
 **$0–$5/month**, dominated by LLM calls. See `src/cost_tracker.py` for live tracking.
 
+## ReserveMN API (UseDirect) reverse-engineering notes
+
+The [ReserveMN](https://reservemn.usedirect.com/MinnesotaWeb/) booking system is a ClojureScript SPA built on the UseDirect platform. Key findings for MN state parks:
+
+### API base
+
+```
+https://mnrdr.usedirect.com/minnesotardr/rdr/
+```
+
+Set at runtime as `globalThis.apiurl`. Enterprise name is `Minnesota`.
+
+### Useful endpoints
+
+| Endpoint | Method | Notes |
+|---|---|---|
+| `fd/places` | GET | All MN state parks with `PlaceId` |
+| `fd/facilities` | GET | All campground facilities with `FacilityId`, `PlaceId` |
+| `fd/placeinfo/{placeId}` | GET | Park contact info, hours |
+| `fd/placeinfo/additional-place-info/{placeId}` | GET | Extended park info |
+| `fd/citypark/{placeId}` | GET | Park lat/lon + **`EnterpriseId`** (= 1 for MN) |
+| `search/place` | POST | Availability by park — returns facilities + unit-type counts, not individual sites |
+| `search/grid` | POST | **Per-site availability grid** — returns `Units` dict with `UnitId`, `Name`, `Slices` (date → IsFree) |
+
+### Mapping a site photo URL to a campsite name
+
+ReserveMN site-specific photos follow this pattern:
+
+```
+https://reservemn.usedirect.com/MinnesotaWeb/images/Minnesota/ParkImages/Units/{UnitId}.jpg
+```
+
+To resolve `UnitId` → campsite name:
+
+1. Find the park's `PlaceId` via `GET fd/places`
+2. Find the facility's `FacilityId` via `GET fd/facilities` (filter by `PlaceId`)
+3. Call `POST search/grid` with `{"FacilityId": <id>, "UnitTypeId": 0, "StartDate": "MM/DD/YYYY", "Nights": 1}` — note: a park may have multiple facilities (e.g. Upper/Lower Campground)
+4. Match `UnitId` in the `Facility.Units` dict → `Name` field
+
+**Example:** `images/Minnesota/ParkImages/Units/12286.jpg` resolves to:
+- `UnitId` 12286 = **Drive-In #16**, Temperance River State Park — **Upper Campground** (FacilityId 783, PlaceId 103)
+- Coordinates: lat 47.5545, lon -90.8716 · Max vehicle length: 50 ft
+
+The Lower Campground at Temperance River is FacilityId 755 (UnitIds 13982–14039). Upper Campground is FacilityId 783 (UnitIds 12264–15410).
+
+### Gotchas
+
+- `GetFacilityData` on the `.aspx` web service returns 403 — use the `rdr/` REST API instead.
+- `search/grid` requires a `POST`, not `GET`.
+- The map icon image path (`MapInfo.UnitImage`) is different from the site photo path — icon uses `Minnesota/Units/{type}`, photo uses `Minnesota/ParkImages/Units/{UnitId}.jpg`.
+- A single park can have multiple facilities (e.g. Upper vs Lower Campground) each with their own `FacilityId` and unit ID range — always check all facilities for a `PlaceId`.
+
 ## Next steps (later phases)
 
 - Phase 2: rebuild "auto-replan when a site closes" as a LangGraph state machine with human-in-the-loop.
