@@ -60,6 +60,14 @@ def _units_cache():
         return None
 
 
+def _siblings_cache():
+    try:
+        import modal
+        return modal.Dict.from_name("mn-siblings-cache", create_if_missing=True)
+    except Exception:
+        return None
+
+
 def _fetch_units(facility_id: int) -> dict[str, dict]:
     """Return {normalized_site_name: {unit_id, lat, lon}} for a facility."""
     try:
@@ -111,6 +119,23 @@ def _fetch_sibling_facility_ids(facility_id: int) -> list[int]:
         return []
 
 
+def _get_sibling_facility_ids(facility_id: int) -> list[int]:
+    """Return sibling facility IDs, using Modal Dict cache when available."""
+    cache = _siblings_cache()
+    cache_key = str(facility_id)
+    if cache is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+    siblings = _fetch_sibling_facility_ids(facility_id)
+    if cache is not None:
+        try:
+            cache[cache_key] = siblings
+        except Exception:
+            pass
+    return siblings
+
+
 def _get_units(facility_id: int) -> dict[str, dict]:
     """Return unit name→unit record map, using Modal Dict cache when available."""
     cache = _units_cache()
@@ -131,7 +156,7 @@ def _get_units(facility_id: int) -> dict[str, dict]:
 def _get_all_units_for_park(facility_id: int) -> dict[str, dict]:
     """Merge units from all facilities (loops) within the same park."""
     units = dict(_get_units(facility_id))
-    for sibling_id in _fetch_sibling_facility_ids(facility_id):
+    for sibling_id in _get_sibling_facility_ids(facility_id):
         units.update(_get_units(sibling_id))
     return units
 
@@ -141,10 +166,16 @@ def _match_unit(units: dict[str, dict], campsite_name: str) -> dict | None:
     target = _normalize_name(campsite_name)
     if not target:
         return None
+    # Exact match first.
     if target in units:
         return units[target]
+    # Substring match: if target is a bare number (e.g. "8", "14"), only match
+    # when it appears immediately after "#" to avoid "8" matching "18" or "w8".
     for name, rec in units.items():
-        if target in name or name in target:
+        if target.isdigit():
+            if f"#{target}" in name:
+                return rec
+        elif target in name or name in target:
             return rec
     return None
 
@@ -197,12 +228,14 @@ def fetch_mn_site_photo_bytes(photo_url: str) -> bytes | None:
         from PIL import Image
         r = httpx.get(photo_url, timeout=15.0)
         if r.status_code != 200:
+            print(f"[mn_site_photo] fetch_bytes HTTP {r.status_code}: {photo_url}")
             return None
         img = Image.open(io.BytesIO(r.content))
         buf = io.BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=85)
         return buf.getvalue()
-    except Exception:
+    except Exception as e:
+        print(f"[mn_site_photo] fetch_bytes error: {e}: {photo_url}")
         return None
 
 
