@@ -230,13 +230,14 @@ def handle_alert(payload: dict) -> dict:
         try:
             if not embed.get("image"):
                 mn_photo = get_mn_site_photo(cg_id, campsite)
+                print(f"[webhook] mn_site_photo: campsite={campsite!r} url={mn_photo!r}")
                 if mn_photo:
                     embed["image"] = {"url": mn_photo}
             coords = get_mn_site_coords(cg_id, campsite)
             if coords:
                 mn_lat, mn_lon = coords
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[webhook] mn_site_photo error: {e}")
 
     # Optional Starlink suitability score. Failures here must not block the alert.
     # Coordinates are looked up from Campflare on first use and cached.

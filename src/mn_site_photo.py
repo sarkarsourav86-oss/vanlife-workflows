@@ -91,8 +91,28 @@ def _fetch_units(facility_id: int) -> dict[str, dict]:
         return {}
 
 
-def _get_units(facility_id: int) -> dict[str, int]:
-    """Return unit name→UnitId map, using Modal Dict cache when available."""
+def _fetch_sibling_facility_ids(facility_id: int) -> list[int]:
+    """Return all facility IDs that share the same PlaceId as facility_id."""
+    try:
+        r = httpx.get(f"{RDR_BASE}/fd/facilities", timeout=10.0)
+        if r.status_code != 200:
+            return []
+        all_facilities = r.json()
+        place_id = next(
+            (f["PlaceId"] for f in all_facilities if f.get("FacilityId") == facility_id), None
+        )
+        if place_id is None:
+            return []
+        return [
+            f["FacilityId"] for f in all_facilities
+            if f.get("PlaceId") == place_id and f.get("FacilityId") != facility_id
+        ]
+    except Exception:
+        return []
+
+
+def _get_units(facility_id: int) -> dict[str, dict]:
+    """Return unit name→unit record map, using Modal Dict cache when available."""
     cache = _units_cache()
     cache_key = str(facility_id)
     if cache is not None:
@@ -105,6 +125,14 @@ def _get_units(facility_id: int) -> dict[str, int]:
             cache[cache_key] = units
         except Exception:
             pass
+    return units
+
+
+def _get_all_units_for_park(facility_id: int) -> dict[str, dict]:
+    """Merge units from all facilities (loops) within the same park."""
+    units = dict(_get_units(facility_id))
+    for sibling_id in _fetch_sibling_facility_ids(facility_id):
+        units.update(_get_units(sibling_id))
     return units
 
 
@@ -128,7 +156,7 @@ def get_mn_site_coords(campground_id: str, campsite_name: str | None) -> tuple[f
     facility_id = _parse_facility_id(campground_id or "")
     if facility_id is None:
         return None
-    units = _get_units(facility_id)
+    units = _get_all_units_for_park(facility_id)
     rec = _match_unit(units, campsite_name)
     if rec and rec.get("lat") and rec.get("lon"):
         return rec["lat"], rec["lon"]
@@ -139,7 +167,8 @@ def get_mn_site_photo(campground_id: str, campsite_name: str | None) -> str | No
     """Return a photo URL for an MN state park campsite, or None.
 
     Only works for campgrounds whose Campflare ID ends with -minnesotastateparks-{facilityId}.
-    Returns None for non-MN-state-park campgrounds and for any lookup failure.
+    Searches all loops/facilities within the same park, so a Campflare campground that
+    covers multiple UseDirect facilities (e.g. Upper + Lower) resolves correctly.
     """
     if not campsite_name:
         return None
@@ -148,7 +177,7 @@ def get_mn_site_photo(campground_id: str, campsite_name: str | None) -> str | No
     if facility_id is None:
         return None
 
-    units = _get_units(facility_id)
+    units = _get_all_units_for_park(facility_id)
     rec = _match_unit(units, campsite_name)
     if not rec:
         return None
