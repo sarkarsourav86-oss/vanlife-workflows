@@ -458,7 +458,7 @@ def user_watch_list(
     return {"n_alerts": len(existing)}
 
 
-@app.function(image=endpoint_image, secrets=secrets, timeout=120, retries=0, schedule=modal.Cron("*/2 * * * *"))
+@app.function(image=worker_image, secrets=secrets, timeout=120, retries=0, schedule=modal.Cron("*/2 * * * *"))
 def poll_availability() -> dict:
     """Poll bulk_availability for all user_watch campgrounds every 2 minutes.
 

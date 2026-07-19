@@ -29,6 +29,7 @@ from typing import Any
 
 from ..campflare import CampflareClient, Campsite
 from ..discord import availability_embed, pick_webhook_url, post_to_discord, send_dm
+from ..mn_site_photo import fetch_mn_site_photo_bytes, get_mn_site_coords, get_mn_site_photo
 from ..site_photo import get_site_info
 from ..starlink_score import get_starlink_score
 from .region_finder import REGIONS
@@ -220,6 +221,29 @@ def handle_alert(payload: dict) -> dict:
         if site_info.shade:
             embed["fields"].append({"name": "Shade", "value": site_info.shade, "inline": True})
 
+    # MN state park site photo + per-site coordinates. Falls through silently for
+    # non-MN campgrounds. Coordinates improve the Starlink score from campground
+    # centroid to the actual site pad.
+    mn_lat: float | None = None
+    mn_lon: float | None = None
+    mn_photo_bytes: bytes | None = None
+    if cg_id and campsite:
+        try:
+            if not embed.get("image"):
+                mn_photo = get_mn_site_photo(cg_id, campsite)
+                print(f"[webhook] mn_site_photo: campsite={campsite!r} url={mn_photo!r}")
+                if mn_photo:
+                    mn_photo_bytes = fetch_mn_site_photo_bytes(mn_photo)
+                    if mn_photo_bytes:
+                        embed["image"] = {"url": "attachment://site.jpg"}
+                    else:
+                        embed["image"] = {"url": mn_photo}
+            coords = get_mn_site_coords(cg_id, campsite)
+            if coords:
+                mn_lat, mn_lon = coords
+        except Exception as e:
+            print(f"[webhook] mn_site_photo error: {e}")
+
     # Optional Starlink suitability score. Failures here must not block the alert.
     # Coordinates are looked up from Campflare on first use and cached.
     if cg_id:
@@ -227,6 +251,8 @@ def handle_alert(payload: dict) -> dict:
             score = get_starlink_score(
                 campground_id=cg_id,
                 campground_name=cg_name,
+                lat=mn_lat,
+                lng=mn_lon,
             )
         except Exception:
             score = None
@@ -258,7 +284,7 @@ def handle_alert(payload: dict) -> dict:
             site_id = payload.get("campsite_name") or ""
             if aid and _check_notif_cache(aid, site_id, date_str):
                 return {"status": "skipped", "reason": "already notified today (cache hit)"}
-            send_dm(user_id, embeds=[embed])
+            send_dm(user_id, embeds=[embed], attachment=mn_photo_bytes, attachment_filename="site.jpg")
             if aid:
                 _write_notif_cache(aid, site_id, date_str)
             return {"status": "dm_sent", "campground": cg_name, "start": date_str, "nights": nights}
